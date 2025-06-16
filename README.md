@@ -15,7 +15,7 @@
   Obtiene información detallada (resolución, duración, peso, pistas, idiomas, canales, formato, etc.) usando `pymediainfo`.
 
 - 🖼️ **Capturas automáticas**  
-  Genera capturas de pantalla (JPG/PNG) en posiciones estratégicas usando `ffmpeg`, configurable en cantidad y porcentaje.
+  Genera capturas de pantalla en formato JPG en posiciones estratégicas usando `ffmpeg`, configurable en cantidad y porcentaje.
 
 - 📦 **Compresión RAR profesional**  
   Comprime cada video en su propio archivo RAR (con o sin compresión), soporta división automática y nombres limpios.
