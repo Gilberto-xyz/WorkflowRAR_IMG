@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Workflow avanzado v3: capturas PNG, info detallada, compresión RAR por carpeta.
+Workflow avanzado v3: capturas JPG, info detallada y compresión RAR por carpeta.
 Combina mejoras de robustez y configuración.
 """
 
@@ -13,11 +13,9 @@ import argparse # <<< argparse
 import subprocess
 import logging
 import unicodedata # <<< unicodedata
-import math
-import time
-from pathlib import Path # <<< pathlib
+from pathlib import Path
 from datetime import datetime
-from functools import wraps # <<< functools
+from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
@@ -33,7 +31,7 @@ try:
     from rich.panel import Panel
     from rich.table import Table
     from rich.progress import (Progress, BarColumn, TextColumn, TimeRemainingColumn,
-                               TransferSpeedColumn, SpinnerColumn, TaskProgressColumn)
+                               SpinnerColumn, TaskProgressColumn)
     from rich.logging import RichHandler
     from rich.theme import Theme # <<< rich.theme
     from rich.traceback import install as install_rich_traceback
@@ -236,7 +234,6 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
         p.get('channels', '') if tipo == 'audio' else '',
         '[F]' in p.get('flags', '') if tipo == 'subs' else False  # True si es forzado
     )
-    from collections import defaultdict
     contador = defaultdict(int)
     for p in pistas:
         contador[key_func(p)] += 1
@@ -260,29 +257,37 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
 
     return " - ".join(partes)
 
-# --- ffmpeg Capturas (Mantenemos PNG) ---
+# --- ffmpeg Capturas (JPEG) ---
 @safe_run
-def generar_capturas(ruta_video: Path, nombre_base_capturas: str, porcentajes: list[int],
-                     carpeta_destino: Path, indice_archivo: int, progress: Progress, task_id) -> list[Path]:
-    """Genera capturas de pantalla SIN PÉRDIDA (PNG) usando ffmpeg."""
+def generar_capturas(
+    ruta_video: Path,
+    nombre_base_capturas: str,
+    porcentajes: list[int],
+    carpeta_destino: Path,
+    indice_archivo: int,
+    duracion_s: float,
+    progress: Progress,
+    task_id,
+) -> list[Path]:
+    """Genera capturas de pantalla en formato JPG usando ffmpeg."""
     capturas_generadas = []
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
-         log.error("'ffmpeg' no encontrado en el PATH. No se pueden generar capturas.")
-         return capturas_generadas # Devuelve lista vacía en error
+        log.error("'ffmpeg' no encontrado en el PATH. No se pueden generar capturas.")
+        return capturas_generadas  # Devuelve lista vacía en error
 
-    # Obtener duración de forma segura
-    media_info = obtener_info_media(ruta_video)
-    duracion_s = media_info.get("duracion_s") if isinstance(media_info, dict) else None
+    # Duración ya obtenida previamente
 
     if not duracion_s or duracion_s <= 0:
-        log.warning(f"No se generarán capturas para '{ruta_video.name}': Duración inválida o no encontrada.")
+        log.warning(
+            f"No se generarán capturas para '{ruta_video.name}': Duración inválida o no encontrada."
+        )
         progress.update(task_id, description=f"[cyan]{ruta_video.name}[/] [warn]- Sin duración[/warn]")
         return capturas_generadas
 
     os.makedirs(carpeta_destino, exist_ok=True)
-    log.info(f"Generando {len(porcentajes)} capturas PNG para '{ruta_video.name}'")
-    progress.update(task_id, total=len(porcentajes), description=f"[cyan]{ruta_video.name}[/] [yellow]- Capturas PNG...[/yellow]")
+    log.info(f"Generando {len(porcentajes)} capturas JPG para '{ruta_video.name}'")
+    progress.update(task_id, total=len(porcentajes), description=f"[cyan]{ruta_video.name}[/] [yellow]- Capturas JPG...[/yellow]")
 
     for idx, pct in enumerate(porcentajes, 1):
         tiempo = max(0.1, duracion_s * (pct / 100.0))
@@ -310,7 +315,9 @@ def generar_capturas(ruta_video: Path, nombre_base_capturas: str, porcentajes: l
             log.error(f"Error inesperado interno en ffmpeg (captura JPG {idx}): {e_inner}", exc_info=True)
 
 
-    log.info(f"Generadas {len(capturas_generadas)}/{len(porcentajes)} capturas PNG para '{ruta_video.name}'.")
+    log.info(
+        f"Generadas {len(capturas_generadas)}/{len(porcentajes)} capturas JPG para '{ruta_video.name}'."
+    )
     progress.update(task_id, description=f"[cyan]{ruta_video.name}[/] [green]- Capturas OK[/green]")
     return capturas_generadas # @safe_run devolverá [] si hubo excepción grave
 
@@ -442,11 +449,17 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
         # 4. Generar Capturas (si no se omite y no hubo error fatal antes)
         if not args.skip_img:
             if resultado_video["info_media"] and not resultado_video["info_media"].get("error"):
+                duracion_s = resultado_video["info_media"].get("duracion_s")
                 # generar_capturas está decorado con @safe_run
                 resultado_video["capturas_generadas"] = generar_capturas(
-                    ruta_video, resultado_video["nombre_limpio"], porcentajes_capturas,
-                    ruta_video.parent / NOMBRE_CARPETA_CAPTURAS, indice_archivo,
-                    progress, task_id_capturas
+                    ruta_video,
+                    resultado_video["nombre_limpio"],
+                    porcentajes_capturas,
+                    ruta_video.parent / NOMBRE_CARPETA_CAPTURAS,
+                    indice_archivo,
+                    duracion_s,
+                    progress,
+                    task_id_capturas,
                 )
                 # Si generar_capturas falla, devolverá [] y loggeará el error.
             else:
@@ -576,15 +589,13 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
         capturas_nombres = [c.name for c in capturas_paths]
         if capturas_nombres:
             if len(capturas_nombres) == 1:
-                capturas_str = f"[good]PNG[/good] (1): {capturas_nombres[0]}"
+                capturas_str = f"[good]JPG[/good] (1): {capturas_nombres[0]}"
             else:
-                capturas_str = f"[good]PNG[/good] ({len(capturas_nombres)})"
+                capturas_str = f"[good]JPG[/good] ({len(capturas_nombres)})"
         else:
             capturas_str = "[detail]Ninguna[/detail]"
         if args.skip_img:
             capturas_str = "[info]Omitidas[/info]"
-        
-        if args.skip_img: capturas_str = "[info]Omitidas[/info]"
 
         info_panel = (
             f"[info]Limpio:[/info]  [detail]{res.get('nombre_limpio', 'N/A')}[/detail]\n"
@@ -592,7 +603,7 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
             f"[info]Duracion.:[/info]  {duracion_str}\n"
             f"[info]Peso:[/info]    {res.get('peso_str', 'N/A')}\n"
             f"[info]Audio:[/info]   {audio_str}\n"
-            f"[info]Subtituloss:[/info]   {subtitulos_str}\n"
+            f"[info]Subtitulos:[/info]   {subtitulos_str}\n"
             f"[info]Capturas:[/info]    {capturas_str}"
         )
         console.print(Panel(info_panel, title=f"[cyan]{res.get('nombre_original', 'N/A')}[/cyan]", border_style="cyan", expand=False))
