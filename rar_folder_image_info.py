@@ -43,8 +43,17 @@ except ImportError:
 # (Se pueden sobrescribir con argparse)
 DEFAULT_DIRECTORIO  = r"C:\Users\Default\Videos"
 DEFAULT_EXTS_VIDEO  = ('.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg')
-DEFAULT_PCTS_UNICOS = [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96]  # 24 capturas + 1 extra = 25
-DEFAULT_PCTS_MULTI  = [20, 40, 60, 80]  # Para múltiples videos, mantener pocas capturas
+# Más capturas por defecto en ambos casos
+# Un solo archivo: capturas regulares del 2% al 98% (cada 2%) => 49 capturas
+DEFAULT_PCTS_UNICOS = [
+    2, 4, 6, 8, 10, 12, 14, 16, 18, 20,
+    22, 24, 26, 28, 30, 32, 34, 36, 38, 40,
+    42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
+    62, 64, 66, 68, 70, 72, 74, 76, 78, 80,
+    82, 84, 86, 88, 90, 92, 94, 96, 98
+]
+# Varios archivos: más densa pero moderada (cada 8%) => 12 capturas
+DEFAULT_PCTS_MULTI  = [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96]
 DEFAULT_RAR_EXE     = r"C:\Program Files\WinRAR\rar.exe" # Ruta por defecto a rar.exe
 DEFAULT_LOG_LEVEL   = logging.WARNING # Nivel de log por defecto
 DEFAULT_WORKERS     = max(1, os.cpu_count() // 2) # Al menos 1 worker
