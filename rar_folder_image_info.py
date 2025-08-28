@@ -656,10 +656,10 @@ def main():
                     help="Número de hilos para procesar videos en paralelo por carpeta.")
     ap.add_argument("--exts", nargs='+', default=list(DEFAULT_EXTS_VIDEO),
                     help="Extensiones de video a buscar.")
-    ap.add_argument("--skip-img", action="store_true",
-                    help="Omitir la generación de capturas de pantalla.")
-    ap.add_argument("--no-compress", dest='compress', action="store_false",
-                    help="Omitir la compresión RAR.")
+    ap.add_argument("-i", "--skip-img", action="store_true",
+                    help="No generar imágenes (capturas) de los videos.")
+    ap.add_argument("-r", "--no-compress", dest='compress', action="store_false",
+                    help="No generar archivos RAR (omitir compresión).")
     ap.add_argument("--rar-store-only", action="store_true", default=True,
                 help="Crear RAR sin compresión (solo almacenar archivos). ACTIVADO POR DEFECTO.")
     ap.add_argument("--rar-compress", action="store_false", dest="rar_store_only",
