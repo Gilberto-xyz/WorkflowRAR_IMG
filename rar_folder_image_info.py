@@ -143,19 +143,54 @@ def formatear_peso(peso_bytes: int | float) -> str:
 
 # --- MediaInfo Helpers ---
 LANGS = {
-    "es": "Español", "en": "Inglés", "ja": "Japonés", "fr": "Francés",
+    # Nota: para Español aplicamos lógica especial más abajo (Latino vs Castellano).
+    "en": "Inglés", "ja": "Japonés", "fr": "Francés",
     "de": "Alemán", "it": "Italiano", "ru": "Ruso", "pt": "Portugués",
-    "es-419": "Español Lat.", "pt-br": "Portugués BR", "zh": "Chino",
-    "ko": "Coreano", "und": "Indet.", "zxx": "N/A", "mul": "Multi"
+    "pt-br": "Portugués BR", "zh": "Chino", "ko": "Coreano",
+    "und": "Indet.", "zxx": "N/A", "mul": "Multi"
 }
 
-def normalize_lang(code: str | None) -> str:
-    if not code: return "Indet."
-    code_low = code.lower()
-    if code_low in LANGS: return LANGS[code_low]
-    base_code = code_low.split('-')[0]
-    if base_code in LANGS: return LANGS[base_code] # Fallback
-    return code.capitalize() # Devolver original capitalizado si no se conoce
+# Patrones para distinguir variantes de Español
+SPANISH_SPAIN_PAT = re.compile(r"\b(castellano|espa(?:ñ|n)a|europa|europeo|spain|ib[eé]rico)\b", re.IGNORECASE)
+SPANISH_LATAM_PAT = re.compile(r"\b(latino|latam|am[eé]rica\s*latina|mexic|argentin|chile|colombi|per[uú]|venez|lat)\b", re.IGNORECASE)
+
+def _normalize_spanish_variant(code_low: str, hint: str) -> str:
+    """Devuelve etiqueta de Español priorizando 'Español Latino' automáticamente,
+    a menos que se detecte explícitamente Castellano (España).
+    """
+    # Códigos que implican Latino explícito
+    if any(x in code_low for x in ["es-419", "es_mx", "es-mx", "es_ar", "es-ar", "es_cl", "es-co", "es-pe", "es-ve", "es-uy", "es-bo", "es-ec", "es-pa", "es-pr", "es-cr", "es-do", "es-sv", "es-gt", "es-hn", "es-ni", "es-py"]):
+        return "Español Latino"
+    # Códigos que implican España
+    if any(x in code_low for x in ["es-es", "es_es", "españa"]):
+        return "Castellano"
+
+    # Inspección por texto auxiliar (título, other_language, etc.)
+    hint_low = hint.lower() if hint else ""
+    if SPANISH_SPAIN_PAT.search(hint_low):
+        return "Castellano"
+    if SPANISH_LATAM_PAT.search(hint_low):
+        return "Español Latino"
+
+    # Por defecto, Español no calificado -> Latino
+    return "Español Latino"
+
+def normalize_lang(code: str | None, hint: str | None = None) -> str:
+    if not code and not hint:
+        return "Indet."
+    code_low = (code or "").lower()
+
+    # Tratar Español con lógica propia
+    base_code = code_low.split('-')[0].replace("_", "-")
+    if code_low.startswith("es") or base_code == "es" or code_low == "spa":
+        return _normalize_spanish_variant(code_low, hint or "")
+
+    # Resto de idiomas por mapa conocido
+    if code_low in LANGS:
+        return LANGS[code_low]
+    if base_code in LANGS:
+        return LANGS[base_code]  # Fallback
+    return (code or "Indet.").capitalize()  # Devolver original capitalizado si no se conoce
 
 def normalize_channels(ch_count: int | None) -> str:
     if not isinstance(ch_count, int): return "?"
@@ -193,6 +228,15 @@ def obtener_info_media(ruta_archivo: Path) -> dict:
         elif track_type == "Audio":
             fmt = getattr(track, "format", "Desc.").upper()
             lang_code = getattr(track, 'language', None)
+            # Recolectar pistas de pistas/hints para distinguir Español
+            other_lang = getattr(track, 'other_language', None)
+            if isinstance(other_lang, (list, tuple)):
+                other_lang = " ".join([str(x) for x in other_lang if x])
+            title_hint = getattr(track, 'title', None)
+            other_title = getattr(track, 'other_title', None)
+            if isinstance(other_title, (list, tuple)):
+                other_title = " ".join([str(x) for x in other_title if x])
+            hint_text = " ".join([x for x in [str(lang_code or ""), other_lang or "", title_hint or "", other_title or ""] if x])
             ch_str = getattr(track, 'channel_s', None) or getattr(track, 'channels', None)
             try: ch_count = int(ch_str) if ch_str else None
             except ValueError: ch_count = None
@@ -202,7 +246,7 @@ def obtener_info_media(ruta_archivo: Path) -> dict:
             flags = f"{default}{forced}".strip()
 
             pista_info = {
-                "lang": normalize_lang(lang_code), "format": fmt,
+                "lang": normalize_lang(lang_code, hint_text), "format": fmt,
                 "channels": normalize_channels(ch_count), "flags": flags
             }
             # Evitar duplicados exactos
@@ -215,12 +259,20 @@ def obtener_info_media(ruta_archivo: Path) -> dict:
             if fmt == "UTF-8":
                 fmt = "SRT"
             lang_code = getattr(track, 'language', None)
+            other_lang = getattr(track, 'other_language', None)
+            if isinstance(other_lang, (list, tuple)):
+                other_lang = " ".join([str(x) for x in other_lang if x])
+            title_hint = getattr(track, 'title', None)
+            other_title = getattr(track, 'other_title', None)
+            if isinstance(other_title, (list, tuple)):
+                other_title = " ".join([str(x) for x in other_title if x])
+            hint_text = " ".join([x for x in [str(lang_code or ""), other_lang or "", title_hint or "", other_title or ""] if x])
             default = "[D]" if getattr(track, 'default', 'No') == 'Yes' else ""
             forced = "[F]" if getattr(track, 'forced', 'No') == 'Yes' else ""
             flags = f"{default}{forced}".strip()
         
             sub_info = {
-                "lang": normalize_lang(lang_code), "format": fmt, "flags": flags
+                "lang": normalize_lang(lang_code, hint_text), "format": fmt, "flags": flags
             }
             if sub_info not in resultado["subtitulos"]:
                  resultado["subtitulos"].append(sub_info)
@@ -231,17 +283,23 @@ def obtener_info_media(ruta_archivo: Path) -> dict:
     return resultado
 
 def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
-    """Agrupa pistas por idioma y formato/canales, usando conteo simple.
-    Para subtítulos, muestra 'Forzado' si corresponde.
+    """Agrupa pistas por idioma y formato/canales.
+    Cambios:
+    - Español por defecto se muestra como 'Español Latino' salvo detectar Castellano.
+    - Para subtítulos, formatea como 'Idioma (FORMATO)'. Si es forzado, usa 'Forzados (FORMATO)'.
+    - Separador: ' – ' para audio, ', ' para subtítulos.
     """
     if not pistas:
         return "[detail]Ninguna[/detail]"
 
+    def is_forced(p):
+        return '[F]' in p.get('flags', '')
+
     key_func = lambda p: (
-        p['lang'],
+        ("Forzados" if (tipo == 'subs' and is_forced(p)) else p['lang']),
         p['format'],
         p.get('channels', '') if tipo == 'audio' else '',
-        '[F]' in p.get('flags', '') if tipo == 'subs' else False  # True si es forzado
+        is_forced(p) if tipo == 'subs' else False
     )
     contador = defaultdict(int)
     for p in pistas:
@@ -251,20 +309,31 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
         return "[detail]Ninguna[/detail]"
 
     partes = []
+    def lang_priority(name: str) -> int:
+        if name in ("Español", "Español Latino", "Castellano"):
+            return 0
+        if name == "Inglés":
+            return 1
+        if name == "Forzados":
+            return 2
+        return 3
+
     sorted_keys = sorted(contador.keys(), key=lambda k: (
-        0 if k[0] == 'Español' else (1 if k[0] == 'Inglés' else 2),
-        k[0], k[1], k[2], k[3]
+        lang_priority(k[0]), k[0], k[1], k[2], k[3]
     ))
 
     for key in sorted_keys:
         lang, fmt, channels, forzado = key
         count = contador[key]
         count_str = f" [detail]x{count}[/detail]" if count > 1 else ""
-        channel_str = f" {channels}" if channels else ""
-        forzado_str = " [bold yellow]Forzado[/bold yellow]" if tipo == 'subs' and forzado else ""
-        partes.append(f"[info]{lang}[/info] [bold]{fmt}[/bold]{channel_str}{forzado_str}{count_str}")
+        if tipo == 'audio':
+            channel_str = f" {channels}" if channels else ""
+            partes.append(f"[info]{lang}[/info] [bold]{fmt}[/bold]{channel_str}{count_str}")
+        else:
+            # Subtítulos: 'Idioma (FORMATO)'; si es forzado, 'Forzados (FORMATO)'
+            partes.append(f"[info]{lang}[/info] ([bold]{fmt}[/bold]){count_str}")
 
-    return " - ".join(partes)
+    return (" – " if tipo == 'audio' else ", ").join(partes)
 
 # --- ffmpeg Capturas (JPEG) ---
 @safe_run
