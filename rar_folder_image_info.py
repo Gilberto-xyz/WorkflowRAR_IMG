@@ -133,14 +133,43 @@ def clean_name(text: str) -> str:
     return re.sub(r'\s{2,}', ' ', text).strip()
 
 def obfuscate_rar_basename(original: str) -> str:
-    """Genera un nombre 'cifrado' manteniendo una referencia al original sin exponerlo literalmente."""
-    if not original:
-        original = "archivo"
-    safe_original = re.sub(r'\s+', '_', original.strip())
-    safe_original = re.sub(r'[^A-Za-z0-9_]+', '_', safe_original)
-    safe_original = safe_original.strip('_') or "archivo"
+    """Genera un nombre compacto que usa sustituciones numéricas ligeras para disfrazar el título."""
+    if not isinstance(original, str):
+        original = ""
 
-    base_upper = safe_original.upper()
+    text = re.sub(r'[\s_]+', ' ', original).strip()
+    if not text:
+        text = "archivo"
+
+    parts = [p.strip() for p in re.split(r'\s*-\s*', text) if p.strip()]
+    selected_parts = []
+    if len(parts) >= 2:
+        selected_parts = parts[:2]
+    else:
+        match = re.search(r'(S\d{1,2}E\d{1,2})', text, re.IGNORECASE)
+        if match:
+            title = text[:match.start()].strip(" -_.")
+            episode = match.group(1).upper()
+            if title:
+                selected_parts.append(title)
+            selected_parts.append(episode)
+        else:
+            selected_parts = [text]
+
+    cleaned_parts = []
+    for part in selected_parts:
+        normalized = unicodedata.normalize("NFKD", part).encode("ascii", "ignore").decode("ascii")
+        normalized = re.sub(r'[^A-Za-z0-9\s-]+', ' ', normalized)
+        normalized = re.sub(r'\s{2,}', ' ', normalized).strip()
+        if normalized:
+            cleaned_parts.append(normalized.replace(' ', '_'))
+
+    if not cleaned_parts:
+        cleaned_parts = ["archivo"]
+
+    base_name = "-".join(cleaned_parts)
+    base_upper = base_name.upper()
+
     letter_to_digit = {
         'A': '4',
         'E': '3',
@@ -151,29 +180,36 @@ def obfuscate_rar_basename(original: str) -> str:
         'B': '8',
         'G': '6'
     }
-    digit_to_letter = {
-        '0': 'O',
-        '1': 'I',
-        '2': 'Z',
-        '3': 'E',
-        '4': 'A',
-        '5': 'S',
-        '6': 'G',
-        '7': 'T',
-        '8': 'B',
-        '9': 'P'
-    }
 
-    transformed_chars = []
-    for ch in base_upper:
-        if ch.isdigit():
-            transformed_chars.append(digit_to_letter.get(ch, ch))
-        else:
-            transformed_chars.append(letter_to_digit.get(ch, ch))
-    transformed = ''.join(transformed_chars)
-    symbolized = transformed.replace('_', '_@')
-    digest = hashlib.sha1(base_upper.encode("utf-8")).hexdigest()[:6].upper()
-    return f"{symbolized}@X{digest}"
+    def transform_token(token: str) -> str:
+        if re.fullmatch(r'S\d{1,2}E\d{1,2}', token, re.IGNORECASE):
+            return token.upper()
+        return ''.join(letter_to_digit.get(ch, ch) for ch in token.upper())
+
+    segments = re.split(r'([_-])', base_upper)
+    obfuscated_segments = []
+    for segment in segments:
+        if not segment:
+            continue
+        if segment in {"-", "_"}:
+            obfuscated_segments.append(segment)
+            continue
+        obfuscated_segments.append(transform_token(segment))
+
+    obfuscated_core = ''.join(obfuscated_segments).strip('_-') or "ARCHIVO"
+
+    digest = hashlib.sha1(base_upper.encode("utf-8")).hexdigest()[:4].upper()
+    suffix = f"_X{digest}"
+
+    max_length = 80
+    core_limit = max_length - len(suffix)
+    if core_limit < 1:
+        core_limit = max_length
+    if len(obfuscated_core) > core_limit:
+        trimmed = obfuscated_core[:core_limit].rstrip('_-')
+        obfuscated_core = trimmed or obfuscated_core[:core_limit]
+
+    return f"{obfuscated_core}{suffix}"
 
 def formatear_peso(peso_bytes: int | float) -> str:
     """Formatea bytes a KB, MB, GB o TB."""
