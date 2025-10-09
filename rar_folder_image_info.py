@@ -13,11 +13,13 @@ import argparse # <<< argparse
 import subprocess
 import logging
 import unicodedata # <<< unicodedata
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
+from typing import Optional
 
 # --- Third-party Libraries ---
 try:
@@ -55,6 +57,7 @@ DEFAULT_PCTS_UNICOS = [
 # Varios archivos: más densa pero moderada (cada 8%) => 12 capturas
 DEFAULT_PCTS_MULTI  = [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96]
 DEFAULT_RAR_EXE     = r"C:\Program Files\WinRAR\rar.exe" # Ruta por defecto a rar.exe
+DEFAULT_RAR_PASSWORD = "GDriveLatinoHD"  # Contraseña por defecto para cifrar RARs
 DEFAULT_LOG_LEVEL   = logging.WARNING # Nivel de log por defecto
 DEFAULT_WORKERS     = max(1, os.cpu_count() // 2) # Al menos 1 worker
 
@@ -128,6 +131,49 @@ def clean_name(text: str) -> str:
     text = text.replace('.', ' ').replace('_', ' ')
     # Consolidar espacios y limpiar bordes
     return re.sub(r'\s{2,}', ' ', text).strip()
+
+def obfuscate_rar_basename(original: str) -> str:
+    """Genera un nombre 'cifrado' manteniendo una referencia al original sin exponerlo literalmente."""
+    if not original:
+        original = "archivo"
+    safe_original = re.sub(r'\s+', '_', original.strip())
+    safe_original = re.sub(r'[^A-Za-z0-9_]+', '_', safe_original)
+    safe_original = safe_original.strip('_') or "archivo"
+
+    base_upper = safe_original.upper()
+    letter_to_digit = {
+        'A': '4',
+        'E': '3',
+        'I': '1',
+        'O': '0',
+        'S': '5',
+        'T': '7',
+        'B': '8',
+        'G': '6'
+    }
+    digit_to_letter = {
+        '0': 'O',
+        '1': 'I',
+        '2': 'Z',
+        '3': 'E',
+        '4': 'A',
+        '5': 'S',
+        '6': 'G',
+        '7': 'T',
+        '8': 'B',
+        '9': 'P'
+    }
+
+    transformed_chars = []
+    for ch in base_upper:
+        if ch.isdigit():
+            transformed_chars.append(digit_to_letter.get(ch, ch))
+        else:
+            transformed_chars.append(letter_to_digit.get(ch, ch))
+    transformed = ''.join(transformed_chars)
+    symbolized = transformed.replace('_', '_@')
+    digest = hashlib.sha1(base_upper.encode("utf-8")).hexdigest()[:6].upper()
+    return f"{symbolized}@X{digest}"
 
 def formatear_peso(peso_bytes: int | float) -> str:
     """Formatea bytes a KB, MB, GB o TB."""
@@ -402,8 +448,9 @@ def generar_capturas(
 # --- Compresión RAR (Individual por archivo) ---
 @safe_run
 def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path],
-                           rar_exe_path: str, rar_store_only: bool, progress: Progress, task_id) -> bool:
-    """Comprime cada video de la carpeta en su propio RAR, usando el nombre limpio del archivo y guardando en 'RARs'."""
+                           rar_exe_path: str, rar_store_only: bool, rar_password: Optional[str],
+                           progress: Progress, task_id) -> bool:
+    """Empaqueta cada video en su propio RAR cifrado (sin compresión por defecto), usando el nombre limpio y guardando en 'RARs'."""
     if not video_files_to_compress:
         log.info(f"No hay videos para comprimir en '{carpeta_path.name}'")
         progress.update(task_id, completed=1, total=1, description=f"[cyan]{carpeta_path.name}[/] [info]- Sin compresión (no videos)[/info]")
@@ -429,20 +476,24 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
     ok = True
     for idx, video_file in enumerate(video_files_to_compress, 1):
         nombre_limpio = clean_name(video_file.stem)
-        rar_filename = f"{nombre_limpio}{RAR_FILENAME_SUFFIX}.rar"
+        obfuscated_name = obfuscate_rar_basename(nombre_limpio)
+        rar_filename = f"{obfuscated_name}{RAR_FILENAME_SUFFIX}.rar"
         rar_filepath = rars_dir / rar_filename
 
         # Actualiza la descripción para mostrar qué archivo se está procesando AHORA
         progress.update(task_id, description=f"[magenta]RAR {idx}/{total_files}:[/] [cyan]{video_file.name}[/]")
 
         size_gb = video_file.stat().st_size / (1024**3)
-        cmd = [rar_exe_path, "a"]
+        cmd = [rar_exe_path, "a", "-ma5"]
         
         # Configurar método de compresión
         if rar_store_only:
             cmd.append("-m0")  # Sin compresión (solo almacenar)
         else:
             cmd.append("-m3")  # Compresión normal
+
+        if rar_password:
+            cmd.append(f"-hp{rar_password}")  # Cifra datos y nombres
         
         split_msg = ""
         if size_gb > RAR_SPLIT_THRESHOLD_GB:
@@ -459,7 +510,8 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
         try:
             action_verb = "Almacenando" if rar_store_only else "Comprimiendo"
             log.info(f"{action_verb} [{idx}/{total_files}] '{video_file.name}' -> '{rar_filename}'{split_msg}")
-            log.debug(f"Ejecutando RAR: {' '.join(cmd)}")
+            cmd_log_safe = ["-hp********" if part.startswith("-hp") else part for part in cmd]
+            log.debug(f"Ejecutando RAR: {' '.join(cmd_log_safe)}")
             timeout_compresion = 6 * 60 * 60  # 6 horas
             result = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=timeout_compresion)
             log.info(f"Creación RAR [{idx}/{total_files}] exitosa: '{rar_filename}'")
@@ -691,7 +743,7 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
     if args.compress and videos_para_comprimir: # Solo comprime si hay videos OK
         # Añade una tarea hija específica para la compresión de esta carpeta
         task_compress = progress.add_task(f"[magenta]Procesando RAR {nombre_carpeta}...[/magenta]", total=1, parent=task_folder)
-        success = comprimir_carpeta_rar(carpeta_path, videos_para_comprimir, args.rar_path, args.rar_store_only, progress, task_compress)
+        success = comprimir_carpeta_rar(carpeta_path, videos_para_comprimir, args.rar_path, args.rar_store_only, args.rar_password, progress, task_compress)
         if not success:
             log.error(f"Fallo en la creación RAR de la carpeta {nombre_carpeta}")
         # Avanza la tarea principal de la carpeta por la etapa de compresión (fase 2)
@@ -733,11 +785,17 @@ def main():
                 help="Crear RAR sin compresión (solo almacenar archivos). ACTIVADO POR DEFECTO.")
     ap.add_argument("--rar-compress", action="store_false", dest="rar_store_only",
                 help="Crear RAR con compresión normal (anula --rar-store-only).")
+    ap.add_argument("--rar-password", default=None,
+                    help=f"Contraseña para cifrar los RAR. Si no se especifica, se usa el valor por defecto ({DEFAULT_RAR_PASSWORD}). También puede definirse con la variable de entorno RAR_PASSWORD.")
     ap.add_argument("--logfile", nargs='?', const=LOG_FILENAME, default=None,
                     help=f"Guardar log detallado en un archivo (por defecto: {LOG_FILENAME} si se especifica la opción sin ruta).")
     ap.add_argument("-v", "--verbose", action="store_const", const=logging.DEBUG, default=DEFAULT_LOG_LEVEL,
                    help="Mostrar mensajes de depuración (DEBUG).")
     args = ap.parse_args()
+
+    if args.rar_password is None:
+        env_password = os.getenv("RAR_PASSWORD")
+        args.rar_password = env_password if env_password else DEFAULT_RAR_PASSWORD
 
     # --- Configurar Logging basado en Args ---
     log_level = args.verbose
