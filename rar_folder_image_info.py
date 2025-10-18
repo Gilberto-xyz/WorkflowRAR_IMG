@@ -46,16 +46,19 @@ except ImportError:
 DEFAULT_DIRECTORIO  = r"C:\Users\Default\Videos"
 DEFAULT_EXTS_VIDEO  = ('.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg')
 # Más capturas por defecto en ambos casos
-# Un solo archivo: capturas regulares del 2% al 98% (cada 2%) => 49 capturas
-DEFAULT_PCTS_UNICOS = [
-    2, 4, 6, 8, 10, 12, 14, 16, 18, 20,
-    22, 24, 26, 28, 30, 32, 34, 36, 38, 40,
-    42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
-    62, 64, 66, 68, 70, 72, 74, 76, 78, 80,
-    82, 84, 86, 88, 90, 92, 94, 96, 98
-]
-# Varios archivos: más densa pero moderada (cada 8%) => 12 capturas
-DEFAULT_PCTS_MULTI  = [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96]
+def generar_porcentajes_equiespaciados(total_capturas: int, inicio_pct: float, fin_pct: float) -> list[float]:
+    """Genera una lista de porcentajes equiespaciados entre 'inicio_pct' y 'fin_pct'."""
+    if total_capturas <= 0:
+        return []
+    if total_capturas == 1:
+        return [round((inicio_pct + fin_pct) / 2, 4)]
+    paso = (fin_pct - inicio_pct) / (total_capturas - 1)
+    return [round(inicio_pct + paso * i, 4) for i in range(total_capturas)]
+
+# Un solo archivo: capturas del 2% al 98% (~0.97% entre cada una) => 100 capturas
+DEFAULT_PCTS_UNICOS = generar_porcentajes_equiespaciados(100, 2.0, 98.0)
+# Varios archivos: del 8% al 96% (~1.8% entre cada una) => 50 capturas
+DEFAULT_PCTS_MULTI  = generar_porcentajes_equiespaciados(50, 8.0, 96.0)
 DEFAULT_RAR_EXE     = r"C:\Program Files\WinRAR\rar.exe" # Ruta por defecto a rar.exe
 DEFAULT_RAR_PASSWORD = "GDriveLatinoHD"  # Contraseña por defecto para cifrar RARs
 DEFAULT_LOG_LEVEL   = logging.WARNING # Nivel de log por defecto
@@ -422,7 +425,7 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
 def generar_capturas(
     ruta_video: Path,
     nombre_base_capturas: str,
-    porcentajes: list[int],
+    porcentajes: list[float],
     carpeta_destino: Path,
     indice_archivo: int,
     duracion_s: float,
@@ -457,7 +460,7 @@ def generar_capturas(
         cmd = [
             ffmpeg_path, "-hide_banner", "-loglevel", "error",
             "-ss", str(tiempo), "-i", str(ruta_video),
-            "-vframes", "1", "-q:v", "2", "-y", str(ruta_captura),  # -q:v 2 ≈ calidad 85-90
+            "-vframes", "1", "-q:v", "0", "-pix_fmt", "yuvj444p", "-y", str(ruta_captura),  # -q:v 0 = calidad máxima JPEG (4:4:4)
         ]
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=45, encoding='utf-8', errors='ignore')
@@ -576,7 +579,7 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
 # --- Procesamiento Individual de Video (Dentro de Carpeta) ---
 # No necesita @safe_run porque lo llamaremos desde un futuro que captura errores
 def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int,
-                       porcentajes_capturas: list[int], args: argparse.Namespace,
+                       porcentajes_capturas: list[float], args: argparse.Namespace,
                        progress: Progress, task_id_capturas) -> dict:
     """Procesa un único video: extrae info y opcionalmente genera capturas."""
     resultado_video = {
