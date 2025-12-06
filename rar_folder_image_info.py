@@ -135,6 +135,16 @@ def clean_name(text: str) -> str:
     # Consolidar espacios y limpiar bordes
     return re.sub(r'\s{2,}', ' ', text).strip()
 
+def display_name_until_parenthesis(filename: str) -> str:
+    """Devuelve el nombre recortado hasta el primer ')' (incluyéndolo) para mostrar en consola."""
+    if not isinstance(filename, str):
+        return ""
+    pos = filename.find(")")
+    if pos != -1:
+        truncated = filename[:pos + 1].strip()
+        return truncated or filename
+    return filename
+
 def obfuscate_rar_basename(original: str) -> str:
     """Genera un nombre compacto que usa sustituciones numéricas ligeras para disfrazar el título."""
     if not isinstance(original, str):
@@ -391,7 +401,7 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
         contador[key_func(p)] += 1
 
     if not contador:
-        return "[detail]Ninguna[/detail]"
+        return "[detail]Ninguno[/detail]"
 
     partes = []
     def lang_priority(name: str) -> int:
@@ -434,6 +444,7 @@ def generar_capturas(
 ) -> list[Path]:
     """Genera capturas de pantalla en formato JPG usando ffmpeg."""
     capturas_generadas = []
+    nombre_display = display_name_until_parenthesis(ruta_video.name)
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
         log.error("'ffmpeg' no encontrado en el PATH. No se pueden generar capturas.")
@@ -443,14 +454,14 @@ def generar_capturas(
 
     if not duracion_s or duracion_s <= 0:
         log.warning(
-            f"No se generarán capturas para '{ruta_video.name}': Duración inválida o no encontrada."
+            f"No se generarán capturas para '{nombre_display}': Duración inválida o no encontrada."
         )
-        progress.update(task_id, description=f"[cyan]{ruta_video.name}[/] [warn]- Sin duración[/warn]")
+        progress.update(task_id, description=f"[cyan]{nombre_display}[/] [warn]- Sin duración[/warn]")
         return capturas_generadas
 
     os.makedirs(carpeta_destino, exist_ok=True)
-    log.info(f"Generando {len(porcentajes)} capturas JPG para '{ruta_video.name}'")
-    progress.update(task_id, total=len(porcentajes), description=f"[cyan]{ruta_video.name}[/] [yellow]- Capturas JPG...[/yellow]")
+    log.info(f"Generando {len(porcentajes)} capturas JPG para '{nombre_display}'")
+    progress.update(task_id, total=len(porcentajes), description=f"[cyan]{nombre_display}[/] [yellow]- Capturas JPG...[/yellow]")
 
     for idx, pct in enumerate(porcentajes, 1):
         tiempo = max(0.1, duracion_s * (pct / 100.0))
@@ -469,7 +480,7 @@ def generar_capturas(
                 log.debug(f"Captura JPG generada: {nombre_captura}")
             else:
                 log.warning(f"ffmpeg OK, pero falta archivo captura JPG: {nombre_captura}")
-            progress.update(task_id, advance=1, description=f"[cyan]{ruta_video.name}[/] [yellow]- Captura {idx}/{len(porcentajes)}[/yellow]")
+            progress.update(task_id, advance=1, description=f"[cyan]{nombre_display}[/] [yellow]- Captura {idx}/{len(porcentajes)}[/yellow]")
         except subprocess.CalledProcessError as e:
             log.error(f"Error ffmpeg (captura JPG {idx}@{pct}%): {e.stderr.strip()}")
         except subprocess.TimeoutExpired:
@@ -479,9 +490,9 @@ def generar_capturas(
 
 
     log.info(
-        f"Generadas {len(capturas_generadas)}/{len(porcentajes)} capturas JPG para '{ruta_video.name}'."
+        f"Generadas {len(capturas_generadas)}/{len(porcentajes)} capturas JPG para '{nombre_display}'."
     )
-    progress.update(task_id, description=f"[cyan]{ruta_video.name}[/] [green]- Capturas OK[/green]")
+    progress.update(task_id, description=f"[cyan]{nombre_display}[/] [green]- Capturas OK[/green]")
     return capturas_generadas # @safe_run devolverá [] si hubo excepción grave
 
 # --- Compresión RAR (Individual por archivo) ---
@@ -518,9 +529,10 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
         obfuscated_name = obfuscate_rar_basename(nombre_limpio)
         rar_filename = f"{obfuscated_name}{RAR_FILENAME_SUFFIX}.rar"
         rar_filepath = rars_dir / rar_filename
+        nombre_display = display_name_until_parenthesis(video_file.name)
 
         # Actualiza la descripción para mostrar qué archivo se está procesando AHORA
-        progress.update(task_id, description=f"[magenta]RAR {idx}/{total_files}:[/] [cyan]{video_file.name}[/]")
+        progress.update(task_id, description=f"[magenta]RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
 
         size_gb = video_file.stat().st_size / (1024**3)
         cmd = [rar_exe_path, "a", "-ma5"]
@@ -548,7 +560,7 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
 
         try:
             action_verb = "Almacenando" if rar_store_only else "Comprimiendo"
-            log.info(f"{action_verb} [{idx}/{total_files}] '{video_file.name}' -> '{rar_filename}'{split_msg}")
+            log.info(f"{action_verb} [{idx}/{total_files}] '{nombre_display}' -> '{rar_filename}'{split_msg}")
             cmd_log_safe = ["-hp********" if part.startswith("-hp") else part for part in cmd]
             log.debug(f"Ejecutando RAR: {' '.join(cmd_log_safe)}")
             timeout_compresion = 6 * 60 * 60  # 6 horas
@@ -557,16 +569,16 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
             progress.update(task_id, advance=1)
         except subprocess.CalledProcessError as e:
             error_message = e.stderr or e.stdout or "Sin salida de error específica."
-            log.error(f"Error durante la creación RAR para '{video_file.name}' (código {e.returncode}):\n{error_message.strip()}")
-            progress.update(task_id, advance=1, description=f"[fail]Error RAR {idx}/{total_files}:[/] [cyan]{video_file.name}[/]")
+            log.error(f"Error durante la creación RAR para '{nombre_display}' (código {e.returncode}):\n{error_message.strip()}")
+            progress.update(task_id, advance=1, description=f"[fail]Error RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
             ok = False
         except subprocess.TimeoutExpired:
-            log.error(f"Timeout durante creación RAR para '{video_file.name}' (límite {timeout_compresion / 3600:.1f}h).")
-            progress.update(task_id, advance=1, description=f"[fail]Timeout RAR {idx}/{total_files}:[/] [cyan]{video_file.name}[/]")
+            log.error(f"Timeout durante creación RAR para '{nombre_display}' (límite {timeout_compresion / 3600:.1f}h).")
+            progress.update(task_id, advance=1, description=f"[fail]Timeout RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
             ok = False
         except Exception as e_inner:
-            log.error(f"Error inesperado interno en creación RAR para '{video_file.name}': {e_inner}", exc_info=True)
-            progress.update(task_id, advance=1, description=f"[fail]Error interno RAR {idx}/{total_files}:[/] [cyan]{video_file.name}[/]")
+            log.error(f"Error inesperado interno en creación RAR para '{nombre_display}': {e_inner}", exc_info=True)
+            progress.update(task_id, advance=1, description=f"[fail]Error interno RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
             ok = False
 
     # Actualización final de la tarea
@@ -592,8 +604,9 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
         "capturas_generadas": [], # Lista de Paths de capturas
         "error": None # Error específico de esta función
     }
+    nombre_display = display_name_until_parenthesis(ruta_video.name)
     try:
-        log.info(f"Procesando video [{indice_archivo}/{total_archivos}]: {ruta_video.name}")
+        log.info(f"Procesando video [{indice_archivo}/{total_archivos}]: {nombre_display}")
 
         # 1. Limpiar nombre base (para capturas y referencia)
         # Usamos la nueva función clean_name
@@ -603,7 +616,7 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
         resultado_video["info_media"] = obtener_info_media(ruta_video)
         # Verificar si la info falló
         if not isinstance(resultado_video["info_media"], dict) or resultado_video["info_media"].get("error"):
-            log.warning(f"Fallo al obtener info media para {ruta_video.name}. Error: {resultado_video['info_media'].get('error', 'Desconocido')}")
+            log.warning(f"Fallo al obtener info media para {nombre_display}. Error: {resultado_video['info_media'].get('error', 'Desconocido')}")
             # No marcamos error fatal aquí, aún podemos intentar obtener peso
             # El error ya está en info_media["error"]
 
@@ -612,7 +625,7 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
             resultado_video["peso_bytes"] = ruta_video.stat().st_size
             resultado_video["peso_str"] = formatear_peso(resultado_video["peso_bytes"])
         except OSError as e:
-            log.warning(f"No se pudo obtener el peso de '{ruta_video.name}': {e}")
+            log.warning(f"No se pudo obtener el peso de '{nombre_display}': {e}")
             resultado_video["error"] = resultado_video["error"] or f"Error obteniendo peso: {e}" # Añadir error si no había uno
 
         # 4. Generar Capturas (si no se omite y no hubo error fatal antes)
@@ -632,23 +645,23 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
                 )
                 # Si generar_capturas falla, devolverá [] y loggeará el error.
             else:
-                 log.warning(f"Omitiendo capturas para '{ruta_video.name}' debido a error previo o falta de info.")
-                 progress.update(task_id_capturas, description=f"[cyan]{ruta_video.name}[/] [warn]- Sin capturas (error previo)[/warn]")
+                 log.warning(f"Omitiendo capturas para '{nombre_display}' debido a error previo o falta de info.")
+                 progress.update(task_id_capturas, description=f"[cyan]{nombre_display}[/] [warn]- Sin capturas (error previo)[/warn]")
         else:
              # Si se omiten las capturas, actualizar la tarea para que no quede "pendiente"
-             progress.update(task_id_capturas, completed=1, total=1, description=f"[cyan]{ruta_video.name}[/] [info]- Capturas omitidas[/info]")
+             progress.update(task_id_capturas, completed=1, total=1, description=f"[cyan]{nombre_display}[/] [info]- Capturas omitidas[/info]")
 
 
-        log.info(f"Finalizado procesamiento básico para: {ruta_video.name}")
+        log.info(f"Finalizado procesamiento básico para: {nombre_display}")
         return resultado_video
 
     except Exception as e:
         # Captura genérica por si algo más falla aquí
-        log.error(f"Fallo crítico procesando '{ruta_video.name}': {e}", exc_info=True)
+        log.error(f"Fallo crítico procesando '{nombre_display}': {e}", exc_info=True)
         resultado_video["error"] = f"Error crítico en procesar_un_video: {e}"
         # Asegurar que la tarea de progreso se marque como fallida
         try:
-            progress.update(task_id_capturas, description=f"[cyan]{ruta_video.name}[/] [fail]- Error Crítico[/fail]")
+            progress.update(task_id_capturas, description=f"[cyan]{nombre_display}[/] [fail]- Error Crítico[/fail]")
         except Exception:
             pass # Ignorar si falla la actualización de progreso
         return resultado_video
@@ -697,8 +710,9 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures_to_tasks = {}
         for idx, ruta_video in enumerate(archivos_video, 1):
+            nombre_display = display_name_until_parenthesis(ruta_video.name)
             # Tarea hija para capturas (si no se omite)
-            task_capturas = progress.add_task(f"[cyan]{ruta_video.name}[/] [dim]- Pendiente[/]", total=1, visible=not args.skip_img, parent=task_folder)
+            task_capturas = progress.add_task(f"[cyan]{nombre_display}[/] [dim]- Pendiente[/]", total=1, visible=not args.skip_img, parent=task_folder)
             future = executor.submit(procesar_un_video, ruta_video, idx, num_videos,
                                      porcentajes, args, progress, task_capturas)
             futures_to_tasks[future] = task_capturas
@@ -714,14 +728,16 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
                     peso_total_videos_carpeta += resultado.get("peso_bytes", 0)
                     videos_para_comprimir.append(resultado["ruta"])
                     if not args.skip_img:
+                        nombre_result_display = display_name_until_parenthesis(resultado.get('nombre_original', '??'))
                         # Asegura que la tarea de captura esté completa
-                         progress.update(task_id_capturas, completed=progress.tasks[task_id_capturas].total, description=f"[cyan]{resultado.get('nombre_original', '??')}[/] [green]- Capturas OK[/green]") # Actualiza descripción final OK
+                        progress.update(task_id_capturas, completed=progress.tasks[task_id_capturas].total, description=f"[cyan]{nombre_result_display}[/] [green]- Capturas OK[/green]") # Actualiza descripción final OK
                 else:
                     error_msg = resultado.get('error', 'Desconocido') if isinstance(resultado, dict) else 'Error crítico futuro'
-                    log.warning(f"Video con error: {resultado.get('nombre_original', 'N/A')} - {error_msg}")
+                    nombre_result_display = display_name_until_parenthesis(resultado.get('nombre_original', 'N/A')) if isinstance(resultado, dict) else 'N/A'
+                    log.warning(f"Video con error: {nombre_result_display} - {error_msg}")
                     # Marca la tarea de captura como fallida si existe
                     if not args.skip_img:
-                        progress.update(task_id_capturas, description=f"[cyan]{resultado.get('nombre_original', '??')}[/] [fail]- Error Proc.[/fail]")
+                        progress.update(task_id_capturas, description=f"[cyan]{nombre_result_display}[/] [fail]- Error Proc.[/fail]")
 
             except Exception as exc:
                 log.critical(f"Error crítico obteniendo resultado del futuro: {exc}", exc_info=True)
@@ -729,8 +745,8 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
                     try: progress.update(task_id_capturas, description="[fail]- Error Futuro[/fail]")
                     except Exception: pass
             finally:
-                 # Avanza la tarea principal de la carpeta por cada video procesado (fase 1)
-                 progress.update(task_folder, advance=1)
+                # Avanza la tarea principal de la carpeta por cada video procesado (fase 1)
+                progress.update(task_folder, advance=1)
     # --- Fin procesamiento paralelo ---
 
     # --- Mostrar resultados individuales ---
