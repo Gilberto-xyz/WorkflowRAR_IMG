@@ -115,6 +115,14 @@ def safe_run(fn):
     return wrapper
 
 # --- Utilidades Varias ---
+def calcular_workers_capturas(total_capturas: int, workers_videos: int) -> int:
+    """Calcula workers para capturas sin saturar CPU."""
+    cpu = os.cpu_count() or 1
+    if total_capturas <= 1:
+        return 1
+    max_por_video = max(1, cpu // max(1, workers_videos))
+    return max(1, min(4, max_por_video, total_capturas))
+
 def clean_name(text: str) -> str:
     """Normaliza a ASCII, quita etiquetas [], (), {}, emojis, múltiples espacios."""
     if not isinstance(text, str):
@@ -442,6 +450,7 @@ def generar_capturas(
     duracion_s: float,
     progress: Progress,
     task_id,
+    workers_capturas: int | None = None,
 ) -> list[Path]:
     """Genera capturas de pantalla en formato JPG usando ffmpeg."""
     capturas_generadas = []
@@ -461,35 +470,84 @@ def generar_capturas(
         return capturas_generadas
 
     os.makedirs(carpeta_destino, exist_ok=True)
-    log.info(f"Generando {len(porcentajes)} capturas JPG para '{nombre_display}'")
-    progress.update(task_id, total=len(porcentajes), description=f"[cyan]{nombre_display}[/] [yellow]- Capturas JPG...[/yellow]")
+    total_capturas = len(porcentajes)
+    log.info(f"Generando {total_capturas} capturas JPG para '{nombre_display}'")
+    progress.update(task_id, total=total_capturas, description=f"[cyan]{nombre_display}[/] [yellow]- Capturas JPG...[/yellow]")
 
-    for idx, pct in enumerate(porcentajes, 1):
+    if total_capturas <= 0:
+        progress.update(task_id, completed=1, total=1, description=f"[cyan]{nombre_display}[/] [warn]- Sin capturas[/warn]")
+        return capturas_generadas
+
+    workers_capturas = max(1, min(workers_capturas or 1, total_capturas))
+    if workers_capturas > 1:
+        log.debug(f"Capturas en paralelo ({workers_capturas} workers) para '{nombre_display}'")
+
+    def _ejecutar_captura(idx: int, pct: float):
         tiempo = max(0.1, duracion_s * (pct / 100.0))
-        nombre_captura = f"{nombre_base_capturas}[{indice_archivo}]_Captura[{idx:02d}].jpg"  # Cambia extensión a .jpg
+        nombre_captura = f"{nombre_base_capturas}[{indice_archivo}]_Captura[{idx:02d}].jpg"
         ruta_captura = carpeta_destino / nombre_captura
-    
+
         cmd = [
             ffmpeg_path, "-hide_banner", "-loglevel", "error",
             "-ss", str(tiempo), "-i", str(ruta_video),
-            "-vframes", "1", "-q:v", "0", "-pix_fmt", "yuvj444p", "-y", str(ruta_captura),  # -q:v 0 = calidad máxima JPEG (4:4:4)
+            "-map", "0:v:0", "-an", "-sn", "-dn",
+            "-vframes", "1", "-q:v", "0", "-pix_fmt", "yuvj444p", "-y", str(ruta_captura),
         ]
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=45, encoding='utf-8', errors='ignore')
             if ruta_captura.exists():
-                capturas_generadas.append(ruta_captura)
-                log.debug(f"Captura JPG generada: {nombre_captura}")
-            else:
-                log.warning(f"ffmpeg OK, pero falta archivo captura JPG: {nombre_captura}")
-            progress.update(task_id, advance=1, description=f"[cyan]{nombre_display}[/] [yellow]- Captura {idx}/{len(porcentajes)}[/yellow]")
+                return idx, pct, ruta_captura, None, None
+            return idx, pct, ruta_captura, "warn", f"ffmpeg OK, pero falta archivo captura JPG: {nombre_captura}"
         except subprocess.CalledProcessError as e:
-            log.error(f"Error ffmpeg (captura JPG {idx}@{pct}%): {e.stderr.strip()}")
+            error_text = (e.stderr or e.stdout or "Sin salida de error especifica.").strip()
+            return idx, pct, None, "error", f"Error ffmpeg (captura JPG {idx}@{pct}%): {error_text}"
         except subprocess.TimeoutExpired:
-            log.warning(f"Timeout ffmpeg (captura JPG {idx}@{pct}%)")
+            return idx, pct, None, "warn", f"Timeout ffmpeg (captura JPG {idx}@{pct}%)"
         except Exception as e_inner:
-            log.error(f"Error inesperado interno en ffmpeg (captura JPG {idx}): {e_inner}", exc_info=True)
+            return idx, pct, None, "error", f"Error inesperado interno en ffmpeg (captura JPG {idx}): {e_inner}"
 
+    completadas = 0
+    resultados = [None] * total_capturas
+    if workers_capturas == 1:
+        for idx, pct in enumerate(porcentajes, 1):
+            idx, pct, ruta_captura, nivel, mensaje = _ejecutar_captura(idx, pct)
+            completadas += 1
+            if nivel == "warn":
+                log.warning(mensaje)
+            elif nivel == "error":
+                log.error(mensaje)
+            else:
+                resultados[idx - 1] = ruta_captura
+                log.debug(f"Captura JPG generada: {ruta_captura.name}")
+            progress.update(task_id, advance=1, description=f"[cyan]{nombre_display}[/] [yellow]- Captura {completadas}/{total_capturas}[/yellow]")
+    else:
+        with ThreadPoolExecutor(max_workers=workers_capturas) as executor:
+            futures = {
+                executor.submit(_ejecutar_captura, idx, pct): (idx, pct)
+                for idx, pct in enumerate(porcentajes, 1)
+            }
+            for future in as_completed(futures):
+                idx_ref, pct_ref = futures[future]
+                try:
+                    idx, pct, ruta_captura, nivel, mensaje = future.result()
+                except Exception as e_inner:
+                    idx, pct = idx_ref, pct_ref
+                    ruta_captura = None
+                    nivel = "error"
+                    mensaje = f"Error inesperado interno en ffmpeg (captura JPG {idx}): {e_inner}"
 
+                completadas += 1
+                if nivel == "warn":
+                    log.warning(mensaje)
+                elif nivel == "error":
+                    log.error(mensaje)
+                else:
+                    resultados[idx - 1] = ruta_captura
+                    if ruta_captura:
+                        log.debug(f"Captura JPG generada: {ruta_captura.name}")
+                progress.update(task_id, advance=1, description=f"[cyan]{nombre_display}[/] [yellow]- Captura {completadas}/{total_capturas}[/yellow]")
+
+    capturas_generadas = [c for c in resultados if c]
     log.info(
         f"Generadas {len(capturas_generadas)}/{len(porcentajes)} capturas JPG para '{nombre_display}'."
     )
@@ -687,6 +745,7 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
         if not args.skip_img:
             if resultado_video["info_media"] and not resultado_video["info_media"].get("error"):
                 duracion_s = resultado_video["info_media"].get("duracion_s")
+                workers_capturas = calcular_workers_capturas(len(porcentajes_capturas), args.workers)
                 # generar_capturas está decorado con @safe_run
                 resultado_video["capturas_generadas"] = generar_capturas(
                     ruta_video,
@@ -697,6 +756,7 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
                     duracion_s,
                     progress,
                     task_id_capturas,
+                    workers_capturas,
                 )
                 # Si generar_capturas falla, devolverá [] y loggeará el error.
             else:
