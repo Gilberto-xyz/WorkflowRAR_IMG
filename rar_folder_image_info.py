@@ -14,6 +14,7 @@ import subprocess
 import logging
 import unicodedata # <<< unicodedata
 import hashlib
+import threading
 from pathlib import Path
 from datetime import datetime
 from functools import wraps
@@ -553,7 +554,7 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
             split_msg = f" (Dividiendo en {RAR_SPLIT_SIZE_GB} GB)"
 
         cmd.extend([
-            "-ep1", "-o+", "-idq",
+            "-ep1", "-o+",
             str(rar_filepath.resolve()),
             str(video_file.resolve())
         ])
@@ -564,21 +565,75 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
             cmd_log_safe = ["-hp********" if part.startswith("-hp") else part for part in cmd]
             log.debug(f"Ejecutando RAR: {' '.join(cmd_log_safe)}")
             timeout_compresion = 6 * 60 * 60  # 6 horas
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=timeout_compresion)
+            progress.update(task_id, completed=idx - 1)
+            output_chunks = []
+            digit_buf = ""
+            last_pct = -1
+
+            def read_rar_output(proc: subprocess.Popen):
+                nonlocal digit_buf, last_pct
+                while True:
+                    ch = proc.stdout.read(1)
+                    if ch == "":
+                        break
+                    output_chunks.append(ch)
+                    if ch.isdigit():
+                        digit_buf += ch
+                        if len(digit_buf) > 3:
+                            digit_buf = digit_buf[-3:]
+                        continue
+                    if ch == "%":
+                        if digit_buf:
+                            try:
+                                pct = int(digit_buf)
+                            except ValueError:
+                                pct = None
+                            if pct is not None:
+                                pct = max(0, min(100, pct))
+                                if pct != last_pct:
+                                    progress.update(task_id, completed=(idx - 1) + (pct / 100.0))
+                                    last_pct = pct
+                            digit_buf = ""
+                        continue
+                    digit_buf = ""
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            reader = threading.Thread(target=read_rar_output, args=(proc,), daemon=True)
+            reader.start()
+            try:
+                proc.wait(timeout=timeout_compresion)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                raise
+            finally:
+                reader.join(timeout=2)
+
+            output_text = "".join(output_chunks)
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(proc.returncode, cmd, output=output_text)
+
+            progress.update(task_id, completed=idx)
             log.info(f"Creación RAR [{idx}/{total_files}] exitosa: '{rar_filename}'")
-            progress.update(task_id, advance=1)
         except subprocess.CalledProcessError as e:
             error_message = e.stderr or e.stdout or "Sin salida de error específica."
             log.error(f"Error durante la creación RAR para '{nombre_display}' (código {e.returncode}):\n{error_message.strip()}")
-            progress.update(task_id, advance=1, description=f"[fail]Error RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
+            progress.update(task_id, completed=idx, description=f"[fail]Error RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
             ok = False
         except subprocess.TimeoutExpired:
             log.error(f"Timeout durante creación RAR para '{nombre_display}' (límite {timeout_compresion / 3600:.1f}h).")
-            progress.update(task_id, advance=1, description=f"[fail]Timeout RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
+            progress.update(task_id, completed=idx, description=f"[fail]Timeout RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
             ok = False
         except Exception as e_inner:
             log.error(f"Error inesperado interno en creación RAR para '{nombre_display}': {e_inner}", exc_info=True)
-            progress.update(task_id, advance=1, description=f"[fail]Error interno RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
+            progress.update(task_id, completed=idx, description=f"[fail]Error interno RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
             ok = False
 
     # Actualización final de la tarea
