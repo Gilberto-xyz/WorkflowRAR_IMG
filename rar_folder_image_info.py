@@ -394,6 +394,8 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
     - Separador: ' – ' para audio, ', ' para subtítulos.
     """
     if not pistas:
+        if tipo == 'subs':
+            return "[detail]Ninguno[/detail]"
         return "[detail]Ninguna[/detail]"
 
     def is_forced(p):
@@ -410,7 +412,9 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
         contador[key_func(p)] += 1
 
     if not contador:
-        return "[detail]Ninguno[/detail]"
+        if tipo == 'subs':
+            return "[detail]Ninguno[/detail]"
+        return "[detail]Ninguna[/detail]"
 
     partes = []
     def lang_priority(name: str) -> int:
