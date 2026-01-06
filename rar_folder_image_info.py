@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Workflow avanzado v3: capturas JPG, info detallada y compresión RAR por carpeta.
+Workflow avanzado v3: capturas JPG/PNG, info detallada y compresión RAR por carpeta.
 Combina mejoras de robustez y configuración.
 """
 
@@ -443,12 +443,13 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
 
     return (" – " if tipo == 'audio' else ", ").join(partes)
 
-# --- ffmpeg Capturas (JPEG) ---
+# --- ffmpeg Capturas (Imagen) ---
 @safe_run
 def generar_capturas(
     ruta_video: Path,
     nombre_base_capturas: str,
     porcentajes: list[float],
+    image_format: str,
     carpeta_destino: Path,
     indice_archivo: int,
     duracion_s: float,
@@ -456,9 +457,15 @@ def generar_capturas(
     task_id,
     workers_capturas: int | None = None,
 ) -> list[Path]:
-    """Genera capturas de pantalla en formato JPG usando ffmpeg."""
+    """Genera capturas de pantalla en formato JPG/PNG usando ffmpeg."""
     capturas_generadas = []
     nombre_display = display_name_until_parenthesis(ruta_video.name)
+    image_format = (image_format or "jpg").lower()
+    if image_format not in {"jpg", "png"}:
+        log.warning(f"Formato de imagen no valido '{image_format}', usando 'jpg'.")
+        image_format = "jpg"
+    formato_ext = "png" if image_format == "png" else "jpg"
+    formato_label = "PNG" if formato_ext == "png" else "JPG"
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
         log.error("'ffmpeg' no encontrado en el PATH. No se pueden generar capturas.")
@@ -475,8 +482,8 @@ def generar_capturas(
 
     os.makedirs(carpeta_destino, exist_ok=True)
     total_capturas = len(porcentajes)
-    log.info(f"Generando {total_capturas} capturas JPG para '{nombre_display}'")
-    progress.update(task_id, total=total_capturas, description=f"[cyan]{nombre_display}[/] [yellow]- Capturas JPG...[/yellow]")
+    log.info(f"Generando {total_capturas} capturas {formato_label} para '{nombre_display}'")
+    progress.update(task_id, total=total_capturas, description=f"[cyan]{nombre_display}[/] [yellow]- Capturas {formato_label}...[/yellow]")
 
     if total_capturas <= 0:
         progress.update(task_id, completed=1, total=1, description=f"[cyan]{nombre_display}[/] [warn]- Sin capturas[/warn]")
@@ -488,27 +495,37 @@ def generar_capturas(
 
     def _ejecutar_captura(idx: int, pct: float):
         tiempo = max(0.1, duracion_s * (pct / 100.0))
-        nombre_captura = f"{nombre_base_capturas}[{indice_archivo}]_Captura[{idx:02d}].jpg"
+        nombre_captura = f"{nombre_base_capturas}[{indice_archivo}]_Captura[{idx:02d}].{formato_ext}"
         ruta_captura = carpeta_destino / nombre_captura
 
-        cmd = [
-            ffmpeg_path, "-hide_banner", "-loglevel", "error",
-            "-ss", str(tiempo), "-i", str(ruta_video),
-            "-map", "0:v:0", "-an", "-sn", "-dn",
-            "-vframes", "1", "-q:v", "0", "-pix_fmt", "yuvj444p", "-y", str(ruta_captura),
-        ]
+        if formato_ext == "png":
+            cmd = [
+                ffmpeg_path, "-hide_banner", "-loglevel", "error",
+                "-ss", str(tiempo), "-i", str(ruta_video),
+                "-map", "0:v:0", "-an", "-sn", "-dn",
+                "-vframes", "1", "-pix_fmt", "rgb24", "-compression_level", "0",
+                "-y", str(ruta_captura),
+            ]
+        else:
+            cmd = [
+                ffmpeg_path, "-hide_banner", "-loglevel", "error",
+                "-ss", str(tiempo), "-i", str(ruta_video),
+                "-map", "0:v:0", "-an", "-sn", "-dn",
+                "-vframes", "1", "-q:v", "0", "-pix_fmt", "yuvj444p",
+                "-y", str(ruta_captura),
+            ]
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=45, encoding='utf-8', errors='ignore')
             if ruta_captura.exists():
                 return idx, pct, ruta_captura, None, None
-            return idx, pct, ruta_captura, "warn", f"ffmpeg OK, pero falta archivo captura JPG: {nombre_captura}"
+            return idx, pct, ruta_captura, "warn", f"ffmpeg OK, pero falta archivo captura {formato_label}: {nombre_captura}"
         except subprocess.CalledProcessError as e:
             error_text = (e.stderr or e.stdout or "Sin salida de error especifica.").strip()
-            return idx, pct, None, "error", f"Error ffmpeg (captura JPG {idx}@{pct}%): {error_text}"
+            return idx, pct, None, "error", f"Error ffmpeg (captura {formato_label} {idx}@{pct}%): {error_text}"
         except subprocess.TimeoutExpired:
-            return idx, pct, None, "warn", f"Timeout ffmpeg (captura JPG {idx}@{pct}%)"
+            return idx, pct, None, "warn", f"Timeout ffmpeg (captura {formato_label} {idx}@{pct}%)"
         except Exception as e_inner:
-            return idx, pct, None, "error", f"Error inesperado interno en ffmpeg (captura JPG {idx}): {e_inner}"
+            return idx, pct, None, "error", f"Error inesperado interno en ffmpeg (captura {formato_label} {idx}): {e_inner}"
 
     completadas = 0
     resultados = [None] * total_capturas
@@ -522,7 +539,7 @@ def generar_capturas(
                 log.error(mensaje)
             else:
                 resultados[idx - 1] = ruta_captura
-                log.debug(f"Captura JPG generada: {ruta_captura.name}")
+                log.debug(f"Captura {formato_label} generada: {ruta_captura.name}")
             progress.update(task_id, advance=1, description=f"[cyan]{nombre_display}[/] [yellow]- Captura {completadas}/{total_capturas}[/yellow]")
     else:
         with ThreadPoolExecutor(max_workers=workers_capturas) as executor:
@@ -538,7 +555,7 @@ def generar_capturas(
                     idx, pct = idx_ref, pct_ref
                     ruta_captura = None
                     nivel = "error"
-                    mensaje = f"Error inesperado interno en ffmpeg (captura JPG {idx}): {e_inner}"
+                    mensaje = f"Error inesperado interno en ffmpeg (captura {formato_label} {idx}): {e_inner}"
 
                 completadas += 1
                 if nivel == "warn":
@@ -548,12 +565,12 @@ def generar_capturas(
                 else:
                     resultados[idx - 1] = ruta_captura
                     if ruta_captura:
-                        log.debug(f"Captura JPG generada: {ruta_captura.name}")
+                        log.debug(f"Captura {formato_label} generada: {ruta_captura.name}")
                 progress.update(task_id, advance=1, description=f"[cyan]{nombre_display}[/] [yellow]- Captura {completadas}/{total_capturas}[/yellow]")
 
     capturas_generadas = [c for c in resultados if c]
     log.info(
-        f"Generadas {len(capturas_generadas)}/{len(porcentajes)} capturas JPG para '{nombre_display}'."
+        f"Generadas {len(capturas_generadas)}/{len(porcentajes)} capturas {formato_label} para '{nombre_display}'."
     )
     progress.update(task_id, description=f"[cyan]{nombre_display}[/] [green]- Capturas OK[/green]")
     return capturas_generadas # @safe_run devolverá [] si hubo excepción grave
@@ -755,6 +772,7 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
                     ruta_video,
                     resultado_video["nombre_limpio"],
                     porcentajes_capturas,
+                    args.img_format,
                     ruta_video.parent / NOMBRE_CARPETA_CAPTURAS,
                     indice_archivo,
                     duracion_s,
@@ -814,7 +832,17 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
     log.info(f"Encontrados {num_videos} archivo(s) de video en '{nombre_carpeta}'.")
     console.print(f"  Encontrados {num_videos} video(s) a procesar.")
 
-    porcentajes = DEFAULT_PCTS_UNICOS if num_videos == 1 else DEFAULT_PCTS_MULTI
+    if num_videos == 1:
+        pct_inicio, pct_fin = 2.0, 98.0
+        porcentajes_default = DEFAULT_PCTS_UNICOS
+    else:
+        pct_inicio, pct_fin = 8.0, 96.0
+        porcentajes_default = DEFAULT_PCTS_MULTI
+    if args.num_capturas is not None:
+        porcentajes = generar_porcentajes_equiespaciados(args.num_capturas, pct_inicio, pct_fin)
+    else:
+        porcentajes = porcentajes_default
+    capturas_label = "PNG" if args.img_format == "png" else "JPG"
 
     resultados_videos = []
     videos_para_comprimir = []
@@ -893,9 +921,9 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
         capturas_nombres = [c.name for c in capturas_paths]
         if capturas_nombres:
             if len(capturas_nombres) == 1:
-                capturas_str = f"[good]JPG[/good] (1): {capturas_nombres[0]}"
+                capturas_str = f"[good]{capturas_label}[/good] (1): {capturas_nombres[0]}"
             else:
-                capturas_str = f"[good]JPG[/good] ({len(capturas_nombres)})"
+                capturas_str = f"[good]{capturas_label}[/good] ({len(capturas_nombres)})"
         else:
             capturas_str = "[detail]Ninguna[/detail]"
         if args.skip_img:
@@ -955,6 +983,10 @@ def main():
                     help="No generar imágenes (capturas) de los videos.")
     ap.add_argument("-r", "--no-compress", dest='compress', action="store_false",
                     help="No generar archivos RAR (omitir compresión).")
+    ap.add_argument("--num-capturas", type=int, default=None,
+                    help="Numero de capturas a generar por video. Si no se indica, se usan los valores por defecto.")
+    ap.add_argument("--img-format", choices=["jpg", "png"], default="jpg",
+                    help="Formato de las capturas: jpg o png (alta calidad).")
     ap.add_argument("--rar-store-only", action="store_true", default=True,
                 help="Crear RAR sin compresión (solo almacenar archivos). ACTIVADO POR DEFECTO.")
     ap.add_argument("--rar-compress", action="store_false", dest="rar_store_only",
@@ -995,6 +1027,11 @@ def main():
     if not base_path.is_dir():
         log.critical(f"El directorio base especificado no existe o no es un directorio: {base_path}")
         console.print(f"[fail]Error:[/fail] Directorio base no válido: [path]{base_path}[/path]")
+        sys.exit(1)
+
+    if args.num_capturas is not None and args.num_capturas < 0:
+        log.critical("El numero de capturas no puede ser negativo.")
+        console.print("[fail]Error:[/fail] --num-capturas no puede ser negativo.")
         sys.exit(1)
 
     if not shutil.which('ffmpeg') and not args.skip_img:

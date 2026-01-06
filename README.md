@@ -1,63 +1,25 @@
 # 🎬 rar_folder_image_info.py
 
 ## ✨ Descripción general
-
-`rar_folder_image_info.py` es un script **avanzado y automatizado** para analizar, documentar y comprimir archivos de video organizados en carpetas. Está pensado para flujos de trabajo exigentes: gestión de grandes colecciones, respaldos, archivado o distribución profesional de contenido multimedia.
+`rar_folder_image_info.py` es un script **avanzado y automatizado** para analizar, documentar y comprimir videos organizados en carpetas. Está pensado para flujos de trabajo exigentes: gestión de grandes colecciones, respaldos, archivado o distribución profesional de contenido multimedia.
 
 ---
 
 ## 🚀 Características principales
-
-- 📂 **Procesamiento masivo por carpetas**  
-  Analiza todas las subcarpetas de un directorio base y procesa cada video encontrado.
-
-- 🏷️ **Extracción de metadatos avanzada**  
-  Obtiene información detallada (resolución, duración, peso, pistas, idiomas, canales, formato, etc.) usando `pymediainfo`.
-
-- 🖼️ **Capturas automáticas**  
-  Genera capturas de pantalla en formato JPG en posiciones estratégicas usando `ffmpeg`, configurable en cantidad y porcentaje.
-
-- 📦 **Compresión RAR profesional**  
-  Comprime cada video en su propio archivo RAR (con o sin compresión), soporta división automática y nombres limpios.
-
-- ⚡ **Procesamiento paralelo**  
-  Usa múltiples hilos para acelerar el análisis y la generación de capturas.
-
-- 🎨 **Interfaz visual moderna**  
-  Utiliza `rich` para mostrar progreso, paneles, tablas y logs en consola de forma atractiva y clara.
-
-- 📝 **Logs detallados**  
-  Guarda logs completos del proceso, incluyendo errores y advertencias.
-
-- 🛠️ **Configuración flexible**  
-  Todos los parámetros clave son configurables por línea de comandos.
-
-- 🦾 **Robustez y tolerancia a errores**  
-  Manejo avanzado de excepciones y logs enriquecidos para máxima estabilidad.
-
-- 🧹 **Soporte para nombres y rutas complejas**  
-  Limpieza y normalización de nombres para máxima compatibilidad.
-
----
-
-## 🌟 Ventajas destacadas
-
-- **Automatización total**: Procesa grandes lotes de videos sin intervención manual.
-- **Ahorro de tiempo**: Paralelización y omisión de pasos innecesarios.
-- **Resultados profesionales**: Documentación visual y técnica lista para compartir o archivar.
-- **Compatibilidad**: Funciona en Windows y puede adaptarse a otros sistemas.
-- **Personalización**: Se adapta a distintos escenarios (solo análisis, solo compresión, solo capturas, etc.).
-- **Feedback visual**: Siempre sabrás el estado y resultado de cada paso.
+- 📂 **Procesamiento masivo por carpetas**: analiza subcarpetas y procesa cada video encontrado.
+- 🏷️ **Metadatos avanzados**: resolución, duración, peso, pistas, idiomas, canales, formato, etc.
+- 🖼️ **Capturas automáticas**: JPG o PNG en posiciones estratégicas con `ffmpeg`.
+- 📦 **Compresión RAR profesional**: RAR por video, con o sin compresión y división automática.
+- ⚡ **Procesamiento paralelo**: hilos configurables para acelerar el flujo.
+- 📝 **Logs detallados**: consola con `rich` y log opcional a archivo.
 
 ---
 
 ## 🧩 Requisitos
-
 - Python 3.8+
-- [pymediainfo](https://pypi.org/project/pymediainfo/)
-- [rich](https://pypi.org/project/rich/)
-- ffmpeg (en el PATH)
-- WinRAR (`rar.exe`, para compresión)
+- `ffmpeg` en el PATH (solo para capturas)
+- WinRAR (`rar.exe`) (solo si quieres compresión)
+- Dependencias Python: `pymediainfo`, `rich`
 
 **Instalación de dependencias:**
 ```bash
@@ -66,55 +28,74 @@ pip install pymediainfo rich
 
 ---
 
-## 🏁 Uso rápido
-
+## 🏁 Uso básico
 ```bash
 python rar_folder_image_info.py [directorio_base] [opciones]
 ```
 
-> 💡 **TIP:** Usa `--help` para ver todos los parámetros y opciones disponibles:
-> ```bash
-> python rar_folder_image_info.py --help
-> ```
-
-### Ejemplo práctico
-
+**Ejemplo rápido:**
 ```bash
-python rar_folder_image_info.py "C:\MisVideos" --workers 4 --rar-path "C:\Program Files\WinRAR\rar.exe" --logfile
+python rar_folder_image_info.py "C:\MisVideos" --workers 4 --rar-path "C:\Program Files\WinRAR\rar.exe"
 ```
 
 ---
 
-## ⚙️ Opciones principales
+## ⚙️ Parámetros (principales y extra)
+| Opción                  | Descripción |
+|-------------------------|-------------|
+| `directorio_base`       | Carpeta base con subcarpetas de videos (posicional). |
+| `--workers N`           | Hilos de procesamiento por carpeta. |
+| `--exts .mkv .mp4 ...`  | Extensiones de video a buscar. |
+| `--skip-img`            | Omitir capturas. |
+| `--num-capturas N`      | Número de capturas por video (reemplaza el valor por defecto). |
+| `--img-format`          | Formato de capturas: `jpg` o `png` (alta calidad). |
+| `--no-compress`         | Omitir compresión RAR. |
+| `--rar-path`            | Ruta completa a `rar.exe`. |
+| `--rar-store-only`      | RAR sin compresión (por defecto). |
+| `--rar-compress`        | RAR con compresión normal. |
+| `--rar-password`        | Contraseña para cifrar RAR (o `RAR_PASSWORD` en entorno). |
+| `--logfile [ruta]`      | Guardar log detallado en archivo. |
+| `-v` / `--verbose`      | Modo depuración. |
 
-| Opción                | Descripción                                               |
-|-----------------------|----------------------------------------------------------|
-| `--workers N`         | Número de hilos para procesar videos en paralelo         |
-| `--exts .mkv .mp4 ...`| Extensiones de video a buscar                            |
-| `--skip-img`          | Omitir la generación de capturas                         |
-| `--no-compress`       | Omitir la compresión RAR                                 |
-| `--rar-store-only`    | Crear RAR sin compresión (por defecto)                   |
-| `--rar-compress`      | Crear RAR con compresión normal                          |
-| `--logfile [ruta]`    | Guardar log detallado en archivo                         |
-| `-v`/`--verbose`      | Modo depuración (más detalles en consola)                |
+> Tip: usa `--help` para ver todas las opciones y valores por defecto.
 
 ---
 
-## 🔄 Ejemplo de flujo de trabajo
+## 🧠 Notas importantes sobre capturas
+- Si hay **1 solo video** en la carpeta: **100 capturas** entre **2% y 98%**.
+- Si hay **varios videos**: **50 capturas** entre **8% y 96%**.
+- `--num-capturas` reemplaza esos valores y mantiene el rango según el caso.
+- `--img-format png` genera PNG sin perdida (archivos mas pesados).
+- `--num-capturas 0` permite desactivar capturas sin usar `--skip-img`.
 
-1. Analiza todas las subcarpetas de un directorio base.
-2. Para cada video:
-   - Extrae metadatos y muestra información detallada.
-   - Genera capturas de pantalla (si no se omite).
-   - Comprime el video en un archivo RAR (si no se omite).
-3. Muestra un resumen final con métricas globales.
+---
+
+## ✅ Ejemplos utiles
+**1) Solo analisis y capturas (sin RAR):**
+```bash
+python rar_folder_image_info.py "C:\MisVideos" --no-compress
+```
+
+**2) Capturas PNG (alta calidad) con 20 imagenes:**
+```bash
+python rar_folder_image_info.py "C:\MisVideos" --num-capturas 20 --img-format png
+```
+
+**3) Solo compresion (sin capturas):**
+```bash
+python rar_folder_image_info.py "C:\MisVideos" --skip-img
+```
+
+**4) Filtrar extensiones y guardar log:**
+```bash
+python rar_folder_image_info.py "C:\MisVideos" --exts .mkv .mp4 --logfile
+```
 
 ---
 
 ## 👨‍💻 Créditos
-
 Desarrollado por **Gilberto Nava Marcos**.
 
 ---
 
-> 🎥 **Ideal para archivistas, uploaders, coleccionistas y cualquier usuario que requiera un flujo de trabajo profesional y automatizado para videos**
+> 🎥 Ideal para archivistas, uploaders, coleccionistas y cualquier usuario que requiera un flujo de trabajo profesional y automatizado para videos.
