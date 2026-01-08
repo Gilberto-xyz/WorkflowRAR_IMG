@@ -390,7 +390,8 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
     """Agrupa pistas por idioma y formato/canales.
     Cambios:
     - Español por defecto se muestra como 'Español Latino' salvo detectar Castellano.
-    - Para subtítulos, formatea como 'Idioma (FORMATO)'. Si es forzado, usa 'Forzados (FORMATO)'.
+    - Para subtítulos, formatea como 'Idioma (FORMATO)'. Si es forzado, agrega
+      la etiqueta 'Forzados' sin perder el idioma.
     - Separador: ' – ' para audio, ', ' para subtítulos.
     """
     if not pistas:
@@ -402,7 +403,7 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
         return '[F]' in p.get('flags', '')
 
     key_func = lambda p: (
-        ("Forzados" if (tipo == 'subs' and is_forced(p)) else p['lang']),
+        p['lang'],
         p['format'],
         p.get('channels', '') if tipo == 'audio' else '',
         is_forced(p) if tipo == 'subs' else False
@@ -422,8 +423,6 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
             return 0
         if name == "Inglés":
             return 1
-        if name == "Forzados":
-            return 2
         return 3
 
     sorted_keys = sorted(contador.keys(), key=lambda k: (
@@ -438,8 +437,11 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
             channel_str = f" {channels}" if channels else ""
             partes.append(f"[info]{lang}[/info] [bold]{fmt}[/bold]{channel_str}{count_str}")
         else:
-            # Subtítulos: 'Idioma (FORMATO)'; si es forzado, 'Forzados (FORMATO)'
-            partes.append(f"[info]{lang}[/info] ([bold]{fmt}[/bold]){count_str}")
+            # Subtítulos: 'Idioma (FORMATO)'; si es forzado, conservar idioma.
+            forced_tag = ", [detail]Forzados[/detail]" if forzado else ""
+            partes.append(
+                f"[info]{lang}[/info] ([bold]{fmt}[/bold]{forced_tag}){count_str}"
+            )
 
     return (" – " if tipo == 'audio' else ", ").join(partes)
 
