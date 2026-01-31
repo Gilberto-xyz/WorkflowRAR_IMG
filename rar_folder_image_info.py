@@ -163,20 +163,20 @@ def obfuscate_rar_basename(original: str) -> str:
     if not text:
         text = "archivo"
 
-    parts = [p.strip() for p in re.split(r'\s*-\s*', text) if p.strip()]
-    selected_parts = []
-    if len(parts) >= 2:
-        selected_parts = parts[:2]
-    else:
-        match = re.search(r'(S\d{1,2}E\d{1,2})', text, re.IGNORECASE)
-        if match:
-            title = text[:match.start()].strip(" -_.")
-            episode = match.group(1).upper()
-            if title:
-                selected_parts.append(title)
-            selected_parts.append(episode)
+    match = re.search(r'\bS\d{1,2}\s*E\d{1,2}\b', text, re.IGNORECASE)
+    if not match:
+        match = re.search(r'\bE\s*\d{1,3}\b', text, re.IGNORECASE)
+    if match:
+        episode = re.sub(r'\s+', '', match.group(0)).upper()
+        title_part = text[:match.start()].strip(" -_.")
+        if title_part:
+            title_short = re.split(r'\s+', title_part, maxsplit=1)[0]
+            selected_parts = [title_short, episode]
         else:
-            selected_parts = [text]
+            selected_parts = [episode]
+    else:
+        parts = [p.strip() for p in re.split(r'\s*-\s*', text) if p.strip()]
+        selected_parts = parts[:2] if len(parts) >= 2 else [text]
 
     cleaned_parts = []
     for part in selected_parts:
@@ -204,7 +204,7 @@ def obfuscate_rar_basename(original: str) -> str:
     }
 
     def transform_token(token: str) -> str:
-        if re.fullmatch(r'S\d{1,2}E\d{1,2}', token, re.IGNORECASE):
+        if re.fullmatch(r'(S\d{1,2}E\d{1,2}|E\d{1,3})', token, re.IGNORECASE):
             return token.upper()
         return ''.join(letter_to_digit.get(ch, ch) for ch in token.upper())
 

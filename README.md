@@ -2,6 +2,7 @@
 
 ## ✨ Descripción general
 `rar_folder_image_info.py` es un script **avanzado y automatizado** para analizar, documentar y comprimir videos organizados en carpetas. Está pensado para flujos de trabajo exigentes: gestión de grandes colecciones, respaldos, archivado o distribución profesional de contenido multimedia.
+Procesa **subcarpetas directas** del directorio base (no procesa videos que estén directamente en el directorio base).
 
 ---
 
@@ -16,10 +17,13 @@
 ---
 
 ## 🧩 Requisitos
-- Python 3.8+
+- Python 3.10+
 - `ffmpeg` en el PATH (solo para capturas)
 - WinRAR (`rar.exe`) (solo si quieres compresión)
 - Dependencias Python: `pymediainfo`, `rich`
+
+Si `ffmpeg` no está disponible, las capturas se omiten automáticamente.  
+Si `rar.exe` no está disponible, la compresión se desactiva automáticamente.
 
 **Instalación de dependencias:**
 ```bash
@@ -43,7 +47,7 @@ python rar_folder_image_info.py "C:\MisVideos" --workers 4 --rar-path "C:\Progra
 ## ⚙️ Parámetros (principales y extra)
 | Opción                  | Descripción |
 |-------------------------|-------------|
-| `directorio_base`       | Carpeta base con subcarpetas de videos (posicional). |
+| `directorio_base`       | Carpeta base con subcarpetas directas a procesar (posicional). |
 | `--workers N`           | Hilos de procesamiento por carpeta. |
 | `--exts .mkv .mp4 ...`  | Extensiones de video a buscar. |
 | `--skip-img`            | Omitir capturas. |
@@ -61,8 +65,18 @@ python rar_folder_image_info.py "C:\MisVideos" --workers 4 --rar-path "C:\Progra
 
 ---
 
+## 🧭 Flujo real del script (resumen)
+- El directorio base solo se usa para **listar subcarpetas directas**.
+- Dentro de cada subcarpeta, busca videos **recursivamente** (excluye `capturas`).
+- Genera metadatos y, si aplica, crea `capturas\` y `RARs\` dentro de cada subcarpeta.
+- Cada video genera su **RAR individual** con nombre ofuscado + sufijo `[GDriveLatinoHD]`.
+- La contraseña RAR es `--rar-password`, o `RAR_PASSWORD`, o el valor por defecto `GDriveLatinoHD`.
+- Si un video supera 20 GB, el RAR se **divide en partes de 15 GB**.
+
+---
+
 ## 🧠 Notas importantes sobre capturas
-- Si hay **1 solo video** en la carpeta: **100 capturas** entre **2% y 98%**.
+- Si hay **1 solo video** en la carpeta: **100 capturas** entre **2% y 98%**.   
 - Si hay **varios videos**: **50 capturas** entre **8% y 96%**.
 - `--num-capturas` reemplaza esos valores y mantiene el rango según el caso.
 - `--img-format png` genera PNG sin perdida (archivos mas pesados).
