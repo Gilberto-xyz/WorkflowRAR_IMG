@@ -61,12 +61,12 @@ DEFAULT_PCTS_UNICOS = generar_porcentajes_equiespaciados(100, 2.0, 98.0)
 # Varios archivos: del 8% al 96% (~1.8% entre cada una) => 50 capturas
 DEFAULT_PCTS_MULTI  = generar_porcentajes_equiespaciados(50, 8.0, 96.0)
 DEFAULT_RAR_EXE     = r"C:\Program Files\WinRAR\rar.exe" # Ruta por defecto a rar.exe
-DEFAULT_RAR_PASSWORD = "GDriveLatinoHD"  # Contraseña por defecto para cifrar RARs
+DEFAULT_RAR_PASSWORD = "GDRIVELatinoHD.NET"  # Contraseña por defecto para cifrar RARs
 DEFAULT_LOG_LEVEL   = logging.WARNING # Nivel de log por defecto
 DEFAULT_WORKERS     = max(1, os.cpu_count() // 2) # Al menos 1 worker
 
 NOMBRE_CARPETA_CAPTURAS = "capturas" # Nombre de la carpeta donde se guardarán las capturas
-RAR_FILENAME_SUFFIX     = "[GDriveLatinoHD]" # Sufijo para nombres de RARs
+RAR_FILENAME_SUFFIX     = "[GDRIVELatinoHD.NET]" # Sufijo para nombres de RARs
 RAR_SPLIT_THRESHOLD_GB  = 20 # Umbral para dividir RARs
 RAR_SPLIT_SIZE_GB       = 15 # Tamaño de cada parte RAR. # Si el archivo es mayor a RAR_SPLIT_THRESHOLD_GB, se divide en partes de este tamaño (RAR_SPLIT_SIZE_GB)
 LOG_FILENAME            = "process_log.log" # Nombre de log por defecto
