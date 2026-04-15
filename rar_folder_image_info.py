@@ -67,8 +67,8 @@ DEFAULT_WORKERS     = max(1, os.cpu_count() // 2) # Al menos 1 worker
 
 NOMBRE_CARPETA_CAPTURAS = "capturas" # Nombre de la carpeta donde se guardarán las capturas
 RAR_FILENAME_SUFFIX     = "[GDRIVELatinoHD.NET]" # Sufijo para nombres de RARs
-RAR_SPLIT_THRESHOLD_GB  = 20 # Umbral para dividir RARs
-RAR_SPLIT_SIZE_GB       = 15 # Tamaño de cada parte RAR. # Si el archivo es mayor a RAR_SPLIT_THRESHOLD_GB, se divide en partes de este tamaño (RAR_SPLIT_SIZE_GB)
+RAR_MAX_VOLUME_SIZE_GB  = 15 # Tamaño máximo permitido por volumen RAR.
+RAR_MAX_VOLUME_SIZE_BYTES = int(RAR_MAX_VOLUME_SIZE_GB * (1024**3))
 LOG_FILENAME            = "process_log.log" # Nombre de log por defecto
 
 # --- Inicialización Global ---
@@ -244,6 +244,19 @@ def formatear_peso(peso_bytes: int | float) -> str:
         else: return f"{peso_bytes / (1024**4):.2f} TB"
     except (ValueError, TypeError):
         return "Inválido"
+
+def calcular_parametro_split_rar(total_size_bytes: int) -> tuple[str | None, str]:
+    """Calcula volúmenes balanceados sin exceder el tamaño máximo por parte."""
+    if total_size_bytes <= RAR_MAX_VOLUME_SIZE_BYTES:
+        return None, ""
+
+    total_size_bytes = int(total_size_bytes)
+    total_parts = max(2, (total_size_bytes + RAR_MAX_VOLUME_SIZE_BYTES - 1) // RAR_MAX_VOLUME_SIZE_BYTES)
+    split_size_bytes = (total_size_bytes + total_parts - 1) // total_parts
+    split_size_bytes = min(split_size_bytes, RAR_MAX_VOLUME_SIZE_BYTES)
+    split_size_param = f"-v{split_size_bytes}b"
+    split_msg = f" (Dividiendo en {total_parts} partes de aprox. {formatear_peso(split_size_bytes)} c/u)"
+    return split_size_param, split_msg
 
 # --- MediaInfo Helpers ---
 LANGS = {
@@ -616,7 +629,7 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
         # Actualiza la descripción para mostrar qué archivo se está procesando AHORA
         progress.update(task_id, description=f"[magenta]RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
 
-        size_gb = video_file.stat().st_size / (1024**3)
+        size_bytes = video_file.stat().st_size
         cmd = [rar_exe_path, "a", "-ma5"]
         
         # Configurar método de compresión
@@ -628,11 +641,9 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
         if rar_password:
             cmd.append(f"-hp{rar_password}")  # Cifra datos y nombres
         
-        split_msg = ""
-        if size_gb > RAR_SPLIT_THRESHOLD_GB:
-            split_size_param = f"-v{RAR_SPLIT_SIZE_GB}g"
+        split_size_param, split_msg = calcular_parametro_split_rar(size_bytes)
+        if split_size_param:
             cmd.append(split_size_param)
-            split_msg = f" (Dividiendo en {RAR_SPLIT_SIZE_GB} GB)"
 
         cmd.extend([
             "-ep1", "-o+",
