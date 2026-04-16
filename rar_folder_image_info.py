@@ -69,6 +69,9 @@ NOMBRE_CARPETA_CAPTURAS = "capturas" # Nombre de la carpeta donde se guardarán 
 RAR_FILENAME_SUFFIX     = "[GDRIVELatinoHD.NET]" # Sufijo para nombres de RARs
 RAR_MAX_VOLUME_SIZE_GB  = 15 # Tamaño máximo permitido por volumen RAR.
 RAR_MAX_VOLUME_SIZE_BYTES = int(RAR_MAX_VOLUME_SIZE_GB * (1024**3))
+RAR_SPLIT_OVERHEAD_PADDING_BYTES = 4 * 1024 * 1024 # Holgura para cabeceras/metadata del RAR.
+RAR_TINY_LAST_VOLUME_THRESHOLD_BYTES = 16 * 1024 * 1024 # Si la última parte es minúscula, se reajusta.
+RAR_SPLIT_RETRY_LIMIT = 3 # Intentos máximos de reajuste cuando aparece una cola mínima.
 LOG_FILENAME            = "process_log.log" # Nombre de log por defecto
 
 # --- Inicialización Global ---
@@ -245,18 +248,171 @@ def formatear_peso(peso_bytes: int | float) -> str:
     except (ValueError, TypeError):
         return "Inválido"
 
-def calcular_parametro_split_rar(total_size_bytes: int) -> tuple[str | None, str]:
-    """Calcula volúmenes balanceados sin exceder el tamaño máximo por parte."""
-    if total_size_bytes <= RAR_MAX_VOLUME_SIZE_BYTES:
-        return None, ""
+def calcular_plan_volumenes_rar(total_size_bytes: int, total_parts: int | None = None,
+                                extra_padding_bytes: int | None = None) -> dict | None:
+    """Calcula un reparto donde N-1 partes son equivalentes y la última absorbe el sobrante."""
+    total_size_bytes = max(0, int(total_size_bytes))
+    if extra_padding_bytes is None:
+        extra_padding_bytes = 0
+    if total_size_bytes <= RAR_MAX_VOLUME_SIZE_BYTES and total_parts is None:
+        return None
 
-    total_size_bytes = int(total_size_bytes)
-    total_parts = max(2, (total_size_bytes + RAR_MAX_VOLUME_SIZE_BYTES - 1) // RAR_MAX_VOLUME_SIZE_BYTES)
-    split_size_bytes = (total_size_bytes + total_parts - 1) // total_parts
-    split_size_bytes = min(split_size_bytes, RAR_MAX_VOLUME_SIZE_BYTES)
-    split_size_param = f"-v{split_size_bytes}b"
-    split_msg = f" (Dividiendo en {total_parts} partes de aprox. {formatear_peso(split_size_bytes)} c/u)"
-    return split_size_param, split_msg
+    if total_parts is None:
+        total_parts = max(2, (total_size_bytes + RAR_MAX_VOLUME_SIZE_BYTES - 1) // RAR_MAX_VOLUME_SIZE_BYTES)
+
+    base_volume_bytes = total_size_bytes // total_parts
+    base_volume_bytes = max(1, min(base_volume_bytes, RAR_MAX_VOLUME_SIZE_BYTES))
+    last_volume_bytes = total_size_bytes - (base_volume_bytes * (total_parts - 1))
+
+    if extra_padding_bytes > 0 and last_volume_bytes + extra_padding_bytes <= RAR_MAX_VOLUME_SIZE_BYTES:
+        last_volume_bytes += extra_padding_bytes
+
+    if last_volume_bytes > RAR_MAX_VOLUME_SIZE_BYTES:
+        overflow_bytes = last_volume_bytes - RAR_MAX_VOLUME_SIZE_BYTES
+        if total_parts <= 1:
+            return None
+        adjust_bytes = (overflow_bytes + (total_parts - 2)) // (total_parts - 1)
+        base_volume_bytes = min(RAR_MAX_VOLUME_SIZE_BYTES, base_volume_bytes + adjust_bytes)
+        last_volume_bytes = total_size_bytes - (base_volume_bytes * (total_parts - 1))
+
+    if last_volume_bytes > RAR_MAX_VOLUME_SIZE_BYTES or last_volume_bytes <= 0:
+        return None
+
+    volume_sizes = [base_volume_bytes] * (total_parts - 1)
+    volume_sizes.append(last_volume_bytes)
+    volume_switches = [f"-v{size}b" for size in volume_sizes]
+
+    split_msg = (
+        f" (Dividiendo en {total_parts} partes: "
+        f"{total_parts - 1} x {formatear_peso(base_volume_bytes)}"
+        f" + última de hasta {formatear_peso(last_volume_bytes)})"
+    )
+
+    return {
+        "total_parts": total_parts,
+        "base_volume_bytes": base_volume_bytes,
+        "last_volume_bytes": last_volume_bytes,
+        "volume_sizes": volume_sizes,
+        "volume_switches": volume_switches,
+        "split_msg": split_msg,
+    }
+
+def estimar_plan_volumenes_rar(source_size_bytes: int,
+                               extra_padding_bytes: int | None = None) -> dict | None:
+    """Estima el plan de volúmenes a partir del tamaño origen más una pequeña holgura."""
+    if extra_padding_bytes is None:
+        extra_padding_bytes = RAR_SPLIT_OVERHEAD_PADDING_BYTES
+    estimated_archive_bytes = int(source_size_bytes) + max(0, int(extra_padding_bytes))
+    total_parts = max(2, (estimated_archive_bytes + RAR_MAX_VOLUME_SIZE_BYTES - 1) // RAR_MAX_VOLUME_SIZE_BYTES)
+    return calcular_plan_volumenes_rar(
+        source_size_bytes,
+        total_parts=total_parts,
+        extra_padding_bytes=extra_padding_bytes)
+
+def obtener_volumenes_rar_generados(rar_filepath: Path) -> list[Path]:
+    """Devuelve los volúmenes generados para un RAR, soportando nombres RAR5 y legacy."""
+    base_name = rar_filepath.stem
+    parent = rar_filepath.parent
+
+    rar5_volumes = sorted(
+        (
+            p for p in parent.iterdir()
+            if p.is_file() and re.search(rf"^{re.escape(base_name)}\.part(\d+)\.rar$", p.name, re.IGNORECASE)
+        ),
+        key=lambda path: int(re.search(r"\.part(\d+)\.rar$", path.name, re.IGNORECASE).group(1))
+        if re.search(r"\.part(\d+)\.rar$", path.name, re.IGNORECASE) else 0)
+    if rar5_volumes:
+        return rar5_volumes
+
+    legacy_volumes = []
+    if rar_filepath.exists():
+        legacy_volumes.append(rar_filepath)
+    legacy_volumes.extend(
+        sorted(
+            (p for p in parent.iterdir()
+             if p.is_file() and re.search(rf"^{re.escape(base_name)}\.r\d+$", p.name, re.IGNORECASE)),
+            key=lambda path: int(re.search(r"\.r(\d+)$", path.name, re.IGNORECASE).group(1))
+        )
+    )
+    return legacy_volumes
+
+def eliminar_volumenes_rar(paths: list[Path]) -> None:
+    """Elimina los volúmenes generados para permitir un reintento limpio."""
+    for path in paths:
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError as exc:
+            log.warning(f"No se pudo eliminar el volumen temporal '{path.name}': {exc}")
+
+def requiere_reajuste_split(volumes: list[Path], split_config: dict | None) -> bool:
+    """Detecta el caso de una última parte diminuta causada por overhead del contenedor."""
+    if not split_config or len(volumes) <= split_config["total_parts"]:
+        return False
+    try:
+        last_size = volumes[-1].stat().st_size
+    except OSError:
+        return False
+    return last_size <= RAR_TINY_LAST_VOLUME_THRESHOLD_BYTES
+
+def ejecutar_comando_rar(cmd: list[str], idx: int, total_files: int, nombre_display: str,
+                         progress: Progress, task_id, timeout_compresion: int) -> str:
+    """Ejecuta rar.exe y propaga errores conservando el progreso incremental."""
+    progress.update(task_id, completed=idx - 1)
+    output_chunks = []
+    digit_buf = ""
+    last_pct = -1
+
+    def read_rar_output(proc: subprocess.Popen):
+        nonlocal digit_buf, last_pct
+        while True:
+            ch = proc.stdout.read(1)
+            if ch == "":
+                break
+            output_chunks.append(ch)
+            if ch.isdigit():
+                digit_buf += ch
+                if len(digit_buf) > 3:
+                    digit_buf = digit_buf[-3:]
+                continue
+            if ch == "%":
+                if digit_buf:
+                    try:
+                        pct = int(digit_buf)
+                    except ValueError:
+                        pct = None
+                    if pct is not None:
+                        pct = max(0, min(100, pct))
+                        if pct != last_pct:
+                            progress.update(task_id, completed=(idx - 1) + (pct / 100.0))
+                            last_pct = pct
+                    digit_buf = ""
+                continue
+            digit_buf = ""
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding='utf-8',
+        errors='ignore'
+    )
+    reader = threading.Thread(target=read_rar_output, args=(proc,), daemon=True)
+    reader.start()
+    try:
+        proc.wait(timeout=timeout_compresion)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        reader.join(timeout=2)
+
+    output_text = "".join(output_chunks)
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=output_text)
+    return output_text
 
 # --- MediaInfo Helpers ---
 LANGS = {
@@ -630,87 +786,71 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
         progress.update(task_id, description=f"[magenta]RAR {idx}/{total_files}:[/] [cyan]{nombre_display}[/]")
 
         size_bytes = video_file.stat().st_size
-        cmd = [rar_exe_path, "a", "-ma5"]
-        
-        # Configurar método de compresión
-        if rar_store_only:
-            cmd.append("-m0")  # Sin compresión (solo almacenar)
-        else:
-            cmd.append("-m3")  # Compresión normal
+        split_config = estimar_plan_volumenes_rar(size_bytes)
+        timeout_compresion = 6 * 60 * 60  # 6 horas
 
-        if rar_password:
-            cmd.append(f"-hp{rar_password}")  # Cifra datos y nombres
-        
-        split_size_param, split_msg = calcular_parametro_split_rar(size_bytes)
-        if split_size_param:
-            cmd.append(split_size_param)
-
-        cmd.extend([
-            "-ep1", "-o+",
-            str(rar_filepath.resolve()),
-            str(video_file.resolve())
-        ])
+        def build_rar_command(active_split_config: dict | None) -> list[str]:
+            cmd = [rar_exe_path, "a", "-ma5"]
+            if rar_store_only:
+                cmd.append("-m0")  # Sin compresión (solo almacenar)
+            else:
+                cmd.append("-m3")  # Compresión normal
+            if rar_password:
+                cmd.append(f"-hp{rar_password}")  # Cifra datos y nombres
+            if active_split_config:
+                cmd.extend(active_split_config["volume_switches"])
+            cmd.extend([
+                "-ep1", "-o+",
+                str(rar_filepath.resolve()),
+                str(video_file.resolve())
+            ])
+            return cmd
 
         try:
             action_verb = "Almacenando" if rar_store_only else "Comprimiendo"
+            split_msg = split_config["split_msg"] if split_config else ""
             log.info(f"{action_verb} [{idx}/{total_files}] '{nombre_display}' -> '{rar_filename}'{split_msg}")
-            cmd_log_safe = ["-hp********" if part.startswith("-hp") else part for part in cmd]
-            log.debug(f"Ejecutando RAR: {' '.join(cmd_log_safe)}")
-            timeout_compresion = 6 * 60 * 60  # 6 horas
-            progress.update(task_id, completed=idx - 1)
-            output_chunks = []
-            digit_buf = ""
-            last_pct = -1
 
-            def read_rar_output(proc: subprocess.Popen):
-                nonlocal digit_buf, last_pct
-                while True:
-                    ch = proc.stdout.read(1)
-                    if ch == "":
-                        break
-                    output_chunks.append(ch)
-                    if ch.isdigit():
-                        digit_buf += ch
-                        if len(digit_buf) > 3:
-                            digit_buf = digit_buf[-3:]
-                        continue
-                    if ch == "%":
-                        if digit_buf:
-                            try:
-                                pct = int(digit_buf)
-                            except ValueError:
-                                pct = None
-                            if pct is not None:
-                                pct = max(0, min(100, pct))
-                                if pct != last_pct:
-                                    progress.update(task_id, completed=(idx - 1) + (pct / 100.0))
-                                    last_pct = pct
-                            digit_buf = ""
-                        continue
-                    digit_buf = ""
+            generated_volumes: list[Path] = []
+            for retry_index in range(RAR_SPLIT_RETRY_LIMIT + 1):
+                cmd = build_rar_command(split_config)
+                cmd_log_safe = ["-hp********" if part.startswith("-hp") else part for part in cmd]
+                if retry_index == 0:
+                    log.debug(f"Ejecutando RAR: {' '.join(cmd_log_safe)}")
+                else:
+                    log.debug(f"Reintentando RAR ajustado (intento {retry_index + 1}): {' '.join(cmd_log_safe)}")
 
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='ignore'
-            )
-            reader = threading.Thread(target=read_rar_output, args=(proc,), daemon=True)
-            reader.start()
-            try:
-                proc.wait(timeout=timeout_compresion)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                raise
-            finally:
-                reader.join(timeout=2)
+                ejecutar_comando_rar(cmd, idx, total_files, nombre_display, progress, task_id, timeout_compresion)
+                generated_volumes = obtener_volumenes_rar_generados(rar_filepath)
+                if not requiere_reajuste_split(generated_volumes, split_config):
+                    break
 
-            output_text = "".join(output_chunks)
-            if proc.returncode != 0:
-                raise subprocess.CalledProcessError(proc.returncode, cmd, output=output_text)
+                if retry_index >= RAR_SPLIT_RETRY_LIMIT:
+                    log.warning(
+                        f"Se alcanzó el límite de reajustes para '{nombre_display}'. "
+                        f"Se conservarán los volúmenes generados en el último intento.")
+                    break
+
+                total_archive_bytes = sum(path.stat().st_size for path in generated_volumes if path.exists())
+                last_volume_size = generated_volumes[-1].stat().st_size
+                retry_padding_bytes = max(
+                    RAR_SPLIT_OVERHEAD_PADDING_BYTES,
+                    last_volume_size + 1024)
+                retry_split_config = estimar_plan_volumenes_rar(
+                    total_archive_bytes,
+                    extra_padding_bytes=retry_padding_bytes)
+                if not retry_split_config:
+                    log.warning(
+                        f"No se pudo recalcular un reparto mejor para '{nombre_display}'. "
+                        f"Se conservarán los volúmenes actuales.")
+                    break
+
+                log.warning(
+                    f"RAR generó un volumen final mínimo ({formatear_peso(last_volume_size)}) para '{nombre_display}'. "
+                    f"Se reintentará con un reparto coherente para absorber ese peso residual.")
+                eliminar_volumenes_rar(generated_volumes)
+                split_config = retry_split_config
+                split_msg = f"{split_config['split_msg']} (reajustado)"
 
             progress.update(task_id, completed=idx)
             log.info(f"Creación RAR [{idx}/{total_files}] exitosa: '{rar_filename}'")
