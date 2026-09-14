@@ -10,6 +10,8 @@ import re
 import shutil
 import sys
 import argparse # <<< argparse
+import json
+import secrets
 import subprocess
 import logging
 import unicodedata # <<< unicodedata
@@ -56,14 +58,17 @@ def generar_porcentajes_equiespaciados(total_capturas: int, inicio_pct: float, f
     paso = (fin_pct - inicio_pct) / (total_capturas - 1)
     return [round(inicio_pct + paso * i, 4) for i in range(total_capturas)]
 
-# Un solo archivo: capturas del 2% al 98% (~0.97% entre cada una) => 100 capturas
-DEFAULT_PCTS_UNICOS = generar_porcentajes_equiespaciados(100, 2.0, 98.0)
-# Varios archivos: del 8% al 96% (~1.8% entre cada una) => 50 capturas
-DEFAULT_PCTS_MULTI  = generar_porcentajes_equiespaciados(50, 8.0, 96.0)
+# Un solo archivo: capturas del 2% al 98% => 300 capturas
+DEFAULT_PCTS_UNICOS = generar_porcentajes_equiespaciados(300, 2.0, 98.0)
+# Varios archivos: del 8% al 96% => 100 capturas
+DEFAULT_PCTS_MULTI  = generar_porcentajes_equiespaciados(100, 8.0, 96.0)
 DEFAULT_RAR_EXE     = r"C:\Program Files\WinRAR\rar.exe" # Ruta por defecto a rar.exe
 DEFAULT_RAR_PASSWORD = "GDRIVELatinoHD.NET"  # Contraseña por defecto para cifrar RARs
 DEFAULT_LOG_LEVEL   = logging.WARNING # Nivel de log por defecto
 DEFAULT_WORKERS     = max(1, os.cpu_count() // 2) # Al menos 1 worker
+CAPTURAS_FIXED_WORKERS_100 = 4 # Perfil fijo para tandas de 100 capturas.
+CAPTURAS_FIXED_WORKERS_300 = 8 # Perfil fijo para tandas de 300 capturas.
+CAPTURAS_ONE_PASS_MAX_INTERVAL_S = 2.5 # One-pass solo compensa en muestreos extremadamente densos.
 
 NOMBRE_CARPETA_CAPTURAS = "capturas" # Nombre de la carpeta donde se guardarán las capturas
 RAR_FILENAME_SUFFIX     = "[GDRIVELatinoHD.NET]" # Sufijo para nombres de RARs
@@ -119,12 +124,15 @@ def safe_run(fn):
 
 # --- Utilidades Varias ---
 def calcular_workers_capturas(total_capturas: int, workers_videos: int) -> int:
-    """Calcula workers para capturas sin saturar CPU."""
-    cpu = os.cpu_count() or 1
+    """Devuelve un número fijo de workers según la tanda de capturas."""
+    _ = workers_videos  # Se mantiene por compatibilidad, pero la política ya es fija.
     if total_capturas <= 1:
         return 1
-    max_por_video = max(1, cpu // max(1, workers_videos))
-    return max(1, min(4, max_por_video, total_capturas))
+    if total_capturas >= 300:
+        return min(CAPTURAS_FIXED_WORKERS_300, total_capturas)
+    if total_capturas >= 100:
+        return min(CAPTURAS_FIXED_WORKERS_100, total_capturas)
+    return min(CAPTURAS_FIXED_WORKERS_100, total_capturas)
 
 def clean_name(text: str) -> str:
     """Normaliza a ASCII, quita etiquetas [], (), {}, emojis, múltiples espacios."""
@@ -157,12 +165,100 @@ def display_name_until_parenthesis(filename: str) -> str:
         return truncated or filename
     return filename
 
+def normalize_rar_source_text(text: str) -> str:
+    """Normaliza un stem preservando el año y descartando tags decorativas."""
+    if not isinstance(text, str):
+        return ""
+    text = re.sub(r'\[[^\]]*?\]|\{[^\}]*?\}', ' ', text)
+    try:
+        text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    except Exception:
+        log.warning(f"Fallo en normalización unicodedata para RAR: '{text[:50]}...'")
+        text = re.sub(r'[^\x00-\x7F]+', ' ', text)
+
+    text = re.sub(r'[._]+', ' ', text)
+    text = re.sub(r'[^A-Za-z0-9()\s-]+', ' ', text)
+    return re.sub(r'\s{2,}', ' ', text).strip()
+
+def extract_rar_release_tag(text: str) -> str | None:
+    """Extrae una etiqueta corta de fuente/release para evitar colisiones entre ediciones."""
+    normalized = normalize_rar_source_text(text)
+    if not normalized:
+        return None
+
+    release_patterns = (
+        (r'\b(?:BD|BLURAY)\s*REMUX\b|\bBDREMUX\b', "BDREMUX"),
+        (r'\bWEB[- ]?DL\b|\bWEBDL\b', "WEBDL"),
+        (r'\bWEBRIP\b', "WEBRIP"),
+        (r'\bWEBCAP\b', "WEBCAP"),
+        (r'\bBDRIP\b', "BDRIP"),
+        (r'\bBRRIP\b', "BRRIP"),
+        (r'\bHDCAM\b|\bHD[- ]?CAM\b', "HDCAM"),
+        (r'\bHDTS\b|\bHD[- ]?TS\b', "HDTS"),
+        (r'\bCAM\b', "CAM"),
+        (r'\b(?:TELE|TELE)?SYNC\b|\bTS\b', "TS"),
+        (r'\bTELECINE\b|\bTC\b', "TC"),
+        (r'\bDVDRIP\b', "DVDRIP"),
+        (r'\bDVD(?:-| )?SCR\b|\bDVDSCR\b', "DVDSCR"),
+        (r'\bSCREENER\b|\bSCR\b', "SCR"),
+        (r'\bHDRIP\b', "HDRIP"),
+        (r'\bR5\b', "R5"),
+        (r'\bHDTV\b', "HDTV"),
+        (r'\bPDTV\b', "PDTV"),
+        (r'\bTVRIP\b', "TVRIP"),
+        (r'\bSATRIP\b', "SATRIP"),
+        (r'\bDSRIP\b', "DSRIP"),
+        (r'\bDVBRIP\b', "DVBRIP"),
+        (r'\bVHSRIP\b', "VHSRIP"),
+        (r'\bBLURAY\b', "BLURAY"),
+        (r'\bBDMV\b', "BDMV"),
+        (r'\bREMUX\b', "REMUX"),
+    )
+
+    for pattern, label in release_patterns:
+        if re.search(pattern, normalized, re.IGNORECASE):
+            return label
+    return None
+
+def select_movie_rar_parts(text: str) -> list[str]:
+    """Extrae un set compacto para películas: título + año + resolución + release tag."""
+    normalized = normalize_rar_source_text(text)
+    if not normalized:
+        return []
+
+    year_match = re.search(r'\((19|20)\d{2}\)|\b(19|20)\d{2}\b', normalized)
+    resolution_match = re.search(r'\b(?:4K|UHD|2160P|1080P|720P|480P)\b', normalized, re.IGNORECASE)
+    release_tag = extract_rar_release_tag(normalized)
+    metadata_match = re.search(
+        r'\b(?:WEB[- ]?DL|WEBRIP|WEBCAP|BLURAY|BDMV|BDRIP|BRRIP|BDREMUX|REMUX|HDCAM|HD[- ]?CAM|HDTS|HD[- ]?TS|CAM|(?:TELE|TELE)?SYNC|TS|TELECINE|TC|DVDRIP|DVD(?:-| )?SCR|DVDSCR|SCREENER|SCR|HDRIP|R5|HDTV|PDTV|TVRIP|SATRIP|DSRIP|DVBRIP|VHSRIP|HDR10\+?|DOLBY|VISION|X26[45]|H\.?26[45]|HEVC|AV1|BITS?|AAC|DDP?|TRUEHD|ATMOS|DUAL|AUDIO|SUB(?:TIT(?:LES?)?)?|CAST?|LAT(?:INO)?|ESP(?:ANOL)?|ES-419|ENG|KOR|JAP)\b',
+        normalized,
+        re.IGNORECASE)
+
+    cut_positions = [match.start() for match in (year_match, resolution_match, metadata_match) if match]
+    title_part = normalized[:min(cut_positions)].strip(" -_.") if cut_positions else normalized
+    title_words = [word for word in re.split(r'\s+', title_part) if word]
+
+    selected_parts = title_words[:4]
+    if year_match:
+        year = re.sub(r'[^0-9]', '', year_match.group(0))
+        if year:
+            selected_parts.append(year)
+
+    if resolution_match:
+        resolution = resolution_match.group(0).upper()
+        selected_parts.append("4K" if resolution in {"UHD", "2160P"} else resolution)
+
+    if release_tag:
+        selected_parts.append(release_tag)
+
+    return selected_parts or (title_words[:4] if title_words else [normalized])
+
 def obfuscate_rar_basename(original: str) -> str:
     """Genera un nombre compacto que usa sustituciones numéricas ligeras para disfrazar el título."""
     if not isinstance(original, str):
         original = ""
 
-    text = re.sub(r'[\s_]+', ' ', original).strip()
+    text = normalize_rar_source_text(original)
     if not text:
         text = "archivo"
 
@@ -172,14 +268,16 @@ def obfuscate_rar_basename(original: str) -> str:
     if match:
         episode = re.sub(r'\s+', '', match.group(0)).upper()
         title_part = text[:match.start()].strip(" -_.")
+        release_tag = extract_rar_release_tag(text)
         if title_part:
             title_short = re.split(r'\s+', title_part, maxsplit=1)[0]
             selected_parts = [title_short, episode]
         else:
             selected_parts = [episode]
+        if release_tag:
+            selected_parts.append(release_tag)
     else:
-        parts = [p.strip() for p in re.split(r'\s*-\s*', text) if p.strip()]
-        selected_parts = parts[:2] if len(parts) >= 2 else [text]
+        selected_parts = select_movie_rar_parts(original)
 
     cleaned_parts = []
     for part in selected_parts:
@@ -192,7 +290,8 @@ def obfuscate_rar_basename(original: str) -> str:
     if not cleaned_parts:
         cleaned_parts = ["archivo"]
 
-    base_name = "-".join(cleaned_parts)
+    joiner = "-" if match else "_"
+    base_name = joiner.join(cleaned_parts)
     base_upper = base_name.upper()
 
     letter_to_digit = {
@@ -303,7 +402,10 @@ def estimar_plan_volumenes_rar(source_size_bytes: int,
     if extra_padding_bytes is None:
         extra_padding_bytes = RAR_SPLIT_OVERHEAD_PADDING_BYTES
     estimated_archive_bytes = int(source_size_bytes) + max(0, int(extra_padding_bytes))
-    total_parts = max(2, (estimated_archive_bytes + RAR_MAX_VOLUME_SIZE_BYTES - 1) // RAR_MAX_VOLUME_SIZE_BYTES)
+    if estimated_archive_bytes <= RAR_MAX_VOLUME_SIZE_BYTES:
+        return None
+
+    total_parts = (estimated_archive_bytes + RAR_MAX_VOLUME_SIZE_BYTES - 1) // RAR_MAX_VOLUME_SIZE_BYTES
     return calcular_plan_volumenes_rar(
         source_size_bytes,
         total_parts=total_parts,
@@ -414,60 +516,324 @@ def ejecutar_comando_rar(cmd: list[str], idx: int, total_files: int, nombre_disp
         raise subprocess.CalledProcessError(proc.returncode, cmd, output=output_text)
     return output_text
 
+def strip_rich_markup(text: str) -> str:
+    """Elimina etiquetas simples de Rich para reutilizar el texto en salidas máquina-app."""
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r"\[/?[^\]]+\]", "", text).strip()
+
 # --- MediaInfo Helpers ---
-LANGS = {
-    # Nota: para Español aplicamos lógica especial más abajo (Latino vs Castellano).
-    "en": "Inglés", "ja": "Japonés", "fr": "Francés",
-    "de": "Alemán", "it": "Italiano", "ru": "Ruso", "pt": "Portugués",
-    "pt-br": "Portugués BR", "zh": "Chino", "ko": "Coreano",
-    "und": "Indet.", "zxx": "N/A", "mul": "Multi"
+FALLBACK_LANG_NAMES = {
+    "und": "Indefinido",
+    "zxx": "Sin contenido lingüístico",
+    "mul": "Múltiples idiomas",
+    "es": "Español",
+    "spa": "Español",
+    "es-419": "Español (Latinoamérica)",
+    "es-es": "Español (España)",
+    "en": "Inglés",
+    "eng": "Inglés",
+    "ja": "Japonés",
+    "jpn": "Japonés",
+    "fr": "Francés",
+    "fra": "Francés",
+    "fre": "Francés",
+    "de": "Alemán",
+    "deu": "Alemán",
+    "ger": "Alemán",
+    "it": "Italiano",
+    "ita": "Italiano",
+    "ru": "Ruso",
+    "rus": "Ruso",
+    "pt": "Portugués",
+    "por": "Portugués",
+    "pt-br": "Portugués (Brasil)",
+    "zh": "Chino",
+    "zho": "Chino",
+    "chi": "Chino",
+    "ko": "Coreano",
+    "kor": "Coreano",
+    "fa": "Persa",
+    "fas": "Persa",
+    "per": "Persa",
+    "th": "Tailandés",
+    "tha": "Tailandés",
 }
+
+FALLBACK_CANONICAL_CODES = {
+    "und": "und",
+    "zxx": "zxx",
+    "mul": "mul",
+    "es": "es",
+    "spa": "es",
+    "es-419": "es-419",
+    "es-la": "es-419",
+    "es-es": "es-es",
+    "en": "en",
+    "eng": "en",
+    "ja": "ja",
+    "jpn": "ja",
+    "fr": "fr",
+    "fra": "fr",
+    "fre": "fr",
+    "de": "de",
+    "deu": "de",
+    "ger": "de",
+    "it": "it",
+    "ita": "it",
+    "ru": "ru",
+    "rus": "ru",
+    "pt": "pt",
+    "por": "pt",
+    "pt-br": "pt-br",
+    "zh": "zh",
+    "zho": "zh",
+    "chi": "zh",
+    "ko": "ko",
+    "kor": "ko",
+    "fa": "fa",
+    "fas": "fa",
+    "per": "fa",
+    "th": "th",
+    "tha": "th",
+}
+
+
+def normalize_lang_code(code: str | None) -> str:
+    if not code:
+        return "und"
+    normalized = str(code).strip().lower().replace("_", "-")
+    return normalized or "und"
+
+
+def load_language_catalog() -> tuple[dict[str, str], dict[str, str]]:
+    language_names = dict(FALLBACK_LANG_NAMES)
+    canonical_codes = dict(FALLBACK_CANONICAL_CODES)
+    catalog_path = Path(__file__).with_name("track_languages.json")
+
+    if not catalog_path.exists():
+        return language_names, canonical_codes
+
+    try:
+        raw = json.loads(catalog_path.read_text(encoding="utf-8"))
+        display_names = raw.get("displayNames", {})
+        if isinstance(display_names, dict):
+            for code, label in display_names.items():
+                if not isinstance(code, str) or not isinstance(label, str):
+                    continue
+                normalized = normalize_lang_code(code)
+                clean_label = label.strip()
+                if normalized and clean_label:
+                    language_names[normalized] = clean_label
+
+        raw_canonical_codes = raw.get("canonicalBaseCodes", {})
+        if isinstance(raw_canonical_codes, dict):
+            for code, canonical in raw_canonical_codes.items():
+                if not isinstance(code, str) or not isinstance(canonical, str):
+                    continue
+                normalized = normalize_lang_code(code)
+                normalized_canonical = normalize_lang_code(canonical)
+                if normalized and normalized_canonical:
+                    canonical_codes[normalized] = normalized_canonical
+    except Exception:
+        return language_names, canonical_codes
+
+    return language_names, canonical_codes
+
+
+LANG_NAMES, LANG_CANONICAL_CODES = load_language_catalog()
 
 # Patrones para distinguir variantes de Español
 SPANISH_SPAIN_PAT = re.compile(r"\b(castellano|espa(?:ñ|n)a|europa|europeo|spain|ib[eé]rico)\b", re.IGNORECASE)
 SPANISH_LATAM_PAT = re.compile(r"\b(latino|latam|am[eé]rica\s*latina|mexic|argentin|chile|colombi|per[uú]|venez|lat)\b", re.IGNORECASE)
 
-def _normalize_spanish_variant(code_low: str, hint: str) -> str:
-    """Devuelve etiqueta de Español priorizando 'Español Latino' automáticamente,
-    a menos que se detecte explícitamente Castellano (España).
-    """
+def _resolve_spanish_variant_code(code_low: str, hint: str) -> str:
+    """Resuelve la variante de español sin inventar una región si el metadato es ambiguo."""
     # Códigos que implican Latino explícito
     if any(x in code_low for x in ["es-419", "es_mx", "es-mx", "es_ar", "es-ar", "es_cl", "es-co", "es-pe", "es-ve", "es-uy", "es-bo", "es-ec", "es-pa", "es-pr", "es-cr", "es-do", "es-sv", "es-gt", "es-hn", "es-ni", "es-py"]):
-        return "Español Latino"
+        return "es-419"
     # Códigos que implican España
     if any(x in code_low for x in ["es-es", "es_es", "españa"]):
-        return "Castellano"
+        return "es-es"
 
     # Inspección por texto auxiliar (título, other_language, etc.)
     hint_low = hint.lower() if hint else ""
     if SPANISH_SPAIN_PAT.search(hint_low):
-        return "Castellano"
+        return "es-es"
     if SPANISH_LATAM_PAT.search(hint_low):
-        return "Español Latino"
+        return "es-419"
 
-    # Por defecto, Español no calificado -> Latino
-    return "Español Latino"
+    return "es"
+
+
+def resolve_display_name(code: str | None) -> str | None:
+    normalized = normalize_lang_code(code)
+    candidates = [
+        normalized,
+        LANG_CANONICAL_CODES.get(normalized),
+    ]
+
+    base_code = normalized.split("-")[0]
+    if base_code:
+        candidates.extend(
+            [
+                base_code,
+                LANG_CANONICAL_CODES.get(base_code),
+            ])
+
+    for candidate in candidates:
+        if candidate and candidate in LANG_NAMES:
+            return LANG_NAMES[candidate]
+
+    return None
 
 def normalize_lang(code: str | None, hint: str | None = None) -> str:
     if not code and not hint:
-        return "Indet."
-    code_low = (code or "").lower()
+        return resolve_display_name("und") or "Indefinido"
+
+    code_low = normalize_lang_code(code)
 
     # Tratar Español con lógica propia
-    base_code = code_low.split('-')[0].replace("_", "-")
+    base_code = code_low.split('-')[0]
     if code_low.startswith("es") or base_code == "es" or code_low == "spa":
-        return _normalize_spanish_variant(code_low, hint or "")
+        resolved_spanish = resolve_display_name(_resolve_spanish_variant_code(code_low, hint or ""))
+        if resolved_spanish:
+            return resolved_spanish
 
-    # Resto de idiomas por mapa conocido
-    if code_low in LANGS:
-        return LANGS[code_low]
-    if base_code in LANGS:
-        return LANGS[base_code]  # Fallback
-    return (code or "Indet.").capitalize()  # Devolver original capitalizado si no se conoce
+    resolved = resolve_display_name(code_low)
+    if resolved:
+        return resolved
+
+    return (code or "Indefinido").capitalize()
 
 def normalize_channels(ch_count: int | None) -> str:
     if not isinstance(ch_count, int): return "?"
     return {1: "1.0", 2: "2.0", 6: "5.1", 7: "6.1", 8: "7.1"}.get(ch_count, str(ch_count))
+
+def find_ffprobe() -> str | None:
+    """Localiza ffprobe para fallback de metadatos cuando MediaInfo no lee pistas."""
+    path_cmd = shutil.which("ffprobe")
+    if path_cmd:
+        return path_cmd
+    common = Path(r"C:\ffmpeg\bin\ffprobe.exe")
+    return str(common) if common.exists() else None
+
+def normalize_ffprobe_codec(codec_name: str | None, profile: str | None = None, tipo: str = "") -> str:
+    codec = (codec_name or "").strip().lower()
+    prof = (profile or "").strip()
+    audio_map = {
+        "aac": "AAC",
+        "ac3": "AC-3",
+        "eac3": "E-AC-3",
+        "dts": "DTS",
+        "truehd": "TRUEHD",
+        "flac": "FLAC",
+        "mp3": "MP3",
+        "pcm_s16le": "PCM",
+        "pcm_s24le": "PCM",
+    }
+    sub_map = {
+        "subrip": "SRT",
+        "ass": "ASS",
+        "ssa": "SSA",
+        "webvtt": "WEBVTT",
+        "hdmv_pgs_subtitle": "PGS",
+        "dvd_subtitle": "VOBSUB",
+    }
+    video_map = {
+        "hevc": "HEVC",
+        "h264": "AVC",
+        "av1": "AV1",
+        "mpeg4": "MPEG-4",
+        "vc1": "VC-1",
+    }
+    if tipo == "audio":
+        if codec == "dts" and prof:
+            return "DTS-HD MA" if "MA" in prof.upper() else "DTS"
+        return audio_map.get(codec, codec.upper() if codec else "Desc.")
+    if tipo == "subs":
+        return sub_map.get(codec, codec.upper() if codec else "Desc.")
+    return video_map.get(codec, codec.upper() if codec else "Desconocido")
+
+def obtener_info_media_ffprobe(ruta_archivo: Path) -> dict:
+    ffprobe = find_ffprobe()
+    if not ffprobe:
+        return {}
+
+    cmd = [
+        ffprobe, "-hide_banner", "-v", "error",
+        "-show_entries",
+        "format=duration:stream=index,codec_type,codec_name,profile,width,height,channels:stream_tags=language,title:stream_disposition=default,forced",
+        "-of", "json", str(ruta_archivo)
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=30,
+        )
+        data = json.loads(proc.stdout or "{}")
+    except Exception as exc:
+        log.debug(f"ffprobe no pudo leer metadatos de '{ruta_archivo.name}': {exc}")
+        return {}
+
+    resultado = {
+        "audio": [],
+        "subtitulos": [],
+        "duracion_s": None,
+        "resolucion": "Desconocida",
+        "formato_video": "Desconocido",
+    }
+
+    duration = (data.get("format") or {}).get("duration")
+    try:
+        if duration:
+            resultado["duracion_s"] = float(duration)
+    except (TypeError, ValueError):
+        pass
+
+    for stream in data.get("streams") or []:
+        stream_type = stream.get("codec_type")
+        tags = stream.get("tags") or {}
+        disposition = stream.get("disposition") or {}
+        lang_code = tags.get("language")
+        title_hint = tags.get("title")
+        hint_text = " ".join(str(x) for x in [lang_code or "", title_hint or ""] if x)
+        default = "[D]" if int(disposition.get("default") or 0) else ""
+        forced = "[F]" if int(disposition.get("forced") or 0) else ""
+        flags = f"{default}{forced}".strip()
+
+        if stream_type == "video" and resultado["resolucion"] == "Desconocida":
+            w = stream.get("width")
+            h = stream.get("height")
+            if w and h:
+                resultado["resolucion"] = f"{w}x{h}"
+            resultado["formato_video"] = normalize_ffprobe_codec(
+                stream.get("codec_name"), stream.get("profile"), "video"
+            )
+        elif stream_type == "audio":
+            pista_info = {
+                "lang": normalize_lang(lang_code, hint_text),
+                "format": normalize_ffprobe_codec(stream.get("codec_name"), stream.get("profile"), "audio"),
+                "channels": normalize_channels(stream.get("channels")),
+                "flags": flags,
+            }
+            if pista_info not in resultado["audio"]:
+                resultado["audio"].append(pista_info)
+        elif stream_type == "subtitle":
+            sub_info = {
+                "lang": normalize_lang(lang_code, hint_text),
+                "format": normalize_ffprobe_codec(stream.get("codec_name"), stream.get("profile"), "subs"),
+                "flags": flags,
+            }
+            if sub_info not in resultado["subtitulos"]:
+                resultado["subtitulos"].append(sub_info)
+
+    return resultado
 
 # Aplicar decorador a la función principal de parseo
 @safe_run
@@ -550,6 +916,26 @@ def obtener_info_media(ruta_archivo: Path) -> dict:
             if sub_info not in resultado["subtitulos"]:
                  resultado["subtitulos"].append(sub_info)
 
+    if (
+        resultado["resolucion"] == "Desconocida"
+        or resultado["formato_video"] == "Desconocido"
+        or resultado["duracion_s"] is None
+        or not resultado["audio"]
+        or not resultado["subtitulos"]
+    ):
+        fallback = obtener_info_media_ffprobe(ruta_archivo)
+        if fallback:
+            if resultado["resolucion"] == "Desconocida" and fallback.get("resolucion") != "Desconocida":
+                resultado["resolucion"] = fallback["resolucion"]
+            if resultado["formato_video"] == "Desconocido" and fallback.get("formato_video") != "Desconocido":
+                resultado["formato_video"] = fallback["formato_video"]
+            if resultado["duracion_s"] is None and fallback.get("duracion_s") is not None:
+                resultado["duracion_s"] = fallback["duracion_s"]
+            if not resultado["audio"]:
+                resultado["audio"] = fallback.get("audio", [])
+            if not resultado["subtitulos"]:
+                resultado["subtitulos"] = fallback.get("subtitulos", [])
+
     # Ordenar para consistencia
     resultado["audio"].sort(key=lambda x: (x['lang'], x['format'], x['channels']))
     resultado["subtitulos"].sort(key=lambda x: (x['lang'], x['format']))
@@ -615,6 +1001,355 @@ def armar_cadena_agrupada(pistas: list[dict], tipo='audio') -> str:
     return (" – " if tipo == 'audio' else ", ").join(partes)
 
 # --- ffmpeg Capturas (Imagen) ---
+_FFMPEG_CUDA_CACHE: dict[str, bool] = {}
+_FFMPEG_CUDA_CACHE_LOCK = threading.Lock()
+
+def _ffmpeg_tiene_cuda(ffmpeg_path: str) -> bool:
+    """Devuelve True si la build actual de ffmpeg anuncia soporte CUDA/NVDEC."""
+    with _FFMPEG_CUDA_CACHE_LOCK:
+        if ffmpeg_path in _FFMPEG_CUDA_CACHE:
+            return _FFMPEG_CUDA_CACHE[ffmpeg_path]
+
+    disponible = False
+    try:
+        proc = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-hwaccels"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            encoding="utf-8",
+            errors="ignore",
+        )
+        salida = f"{proc.stdout}\n{proc.stderr}"
+        disponible = re.search(r"(?im)^\s*cuda\s*$", salida) is not None
+    except Exception:
+        disponible = False
+
+    with _FFMPEG_CUDA_CACHE_LOCK:
+        _FFMPEG_CUDA_CACHE[ffmpeg_path] = disponible
+    return disponible
+
+def _calcular_plan_muestreo_capturas(porcentajes: list[float], duracion_s: float) -> Optional[dict]:
+    """
+    Calcula una ventana útil y la tasa de muestreo exacta para obtener N capturas
+    en una sola pasada sobre el video.
+    """
+    if not porcentajes or duracion_s <= 0:
+        return None
+
+    porcentajes_ordenados = sorted(max(0.0, min(100.0, float(p))) for p in porcentajes)
+    total_capturas = len(porcentajes_ordenados)
+    inicio_s = max(0.0, duracion_s * (porcentajes_ordenados[0] / 100.0))
+    fin_s = min(duracion_s, duracion_s * (porcentajes_ordenados[-1] / 100.0))
+    ventana_s = max(0.0, fin_s - inicio_s)
+    if total_capturas <= 1 or ventana_s <= 0.001:
+        return None
+
+    # Una captura por subventana temporal: se adapta automáticamente a 20 min, 1 h o una película larga.
+    fps = total_capturas / ventana_s
+    timeout_s = int(max(180, min(1800, (ventana_s * 0.08) + 90)))
+    return {
+        "inicio_s": inicio_s,
+        "fin_s": fin_s,
+        "ventana_s": ventana_s,
+        "fps": fps,
+        "total_capturas": total_capturas,
+        "intervalo_s": ventana_s / total_capturas,
+        "timeout_s": timeout_s,
+    }
+
+def _listar_capturas_generadas(
+    carpeta_destino: Path,
+    nombre_base_capturas: str,
+    indice_archivo: int,
+    formato_ext: str,
+) -> list[Path]:
+    prefijo = f"{nombre_base_capturas}[{indice_archivo}]_Captura["
+    sufijo = f"].{formato_ext}"
+    patron = re.compile(
+        rf"^{re.escape(prefijo)}(\d+){re.escape(sufijo)}$",
+        re.IGNORECASE,
+    )
+    encontradas: list[tuple[int, Path]] = []
+    for path in carpeta_destino.iterdir():
+        if not path.is_file():
+            continue
+        match = patron.match(path.name)
+        if match:
+            encontradas.append((int(match.group(1)), path))
+    encontradas.sort(key=lambda item: item[0])
+    return [path for _, path in encontradas]
+
+def _limpiar_capturas_generadas(
+    carpeta_destino: Path,
+    nombre_base_capturas: str,
+    indice_archivo: int,
+    formato_ext: str,
+) -> None:
+    for path in _listar_capturas_generadas(carpeta_destino, nombre_base_capturas, indice_archivo, formato_ext):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            log.debug(f"No se pudo borrar captura parcial '{path.name}': {exc}")
+
+def _construir_comando_capturas_one_pass(
+    ffmpeg_path: str,
+    ruta_video: Path,
+    ruta_salida_patron: Path,
+    plan_muestreo: dict,
+    formato_ext: str,
+    usar_cuda: bool,
+) -> list[str]:
+    filtros = [
+        f"trim=start={plan_muestreo['inicio_s']:.6f}:end={plan_muestreo['fin_s']:.6f}",
+        f"fps={plan_muestreo['fps']:.12f}",
+    ]
+    if usar_cuda:
+        filtros.extend(["hwdownload", "format=nv12"])
+
+    cmd = [ffmpeg_path, "-hide_banner", "-loglevel", "error"]
+    if usar_cuda:
+        cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+
+    cmd.extend([
+        "-i", str(ruta_video),
+        "-map", "0:v:0",
+        "-an", "-sn", "-dn",
+        "-vf", ",".join(filtros),
+        "-frames:v", str(plan_muestreo["total_capturas"]),
+        "-start_number", "1",
+    ])
+
+    if formato_ext == "png":
+        cmd.extend(["-pix_fmt", "rgb24", "-compression_level", "0"])
+    else:
+        cmd.extend(["-q:v", "0", "-pix_fmt", "yuvj444p"])
+
+    cmd.extend(["-y", str(ruta_salida_patron)])
+    return cmd
+
+def _ejecutar_capturas_one_pass(
+    ffmpeg_path: str,
+    ruta_video: Path,
+    nombre_base_capturas: str,
+    carpeta_destino: Path,
+    indice_archivo: int,
+    formato_ext: str,
+    plan_muestreo: dict,
+) -> tuple[list[Path], Optional[str], Optional[str]]:
+    ruta_salida_patron = carpeta_destino / (
+        f"{nombre_base_capturas.replace('%', '%%')}[{indice_archivo}]_Captura[%02d].{formato_ext}"
+    )
+    modos = ["cpu"]
+    if _ffmpeg_tiene_cuda(ffmpeg_path):
+        modos.insert(0, "cuda")
+
+    errores: list[str] = []
+    for modo in modos:
+        usar_cuda = modo == "cuda"
+        _limpiar_capturas_generadas(carpeta_destino, nombre_base_capturas, indice_archivo, formato_ext)
+        cmd = _construir_comando_capturas_one_pass(
+            ffmpeg_path,
+            ruta_video,
+            ruta_salida_patron,
+            plan_muestreo,
+            formato_ext,
+            usar_cuda,
+        )
+        try:
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=plan_muestreo["timeout_s"],
+                encoding="utf-8",
+                errors="ignore",
+            )
+            capturas = _listar_capturas_generadas(
+                carpeta_destino,
+                nombre_base_capturas,
+                indice_archivo,
+                formato_ext,
+            )
+            if len(capturas) == plan_muestreo["total_capturas"]:
+                return capturas, modo.upper(), None
+            errores.append(
+                f"{modo.upper()}: generó {len(capturas)}/{plan_muestreo['total_capturas']} capturas."
+            )
+        except subprocess.CalledProcessError as exc:
+            error_text = (exc.stderr or exc.stdout or "Sin salida de error específica.").strip()
+            errores.append(f"{modo.upper()}: {error_text}")
+        except subprocess.TimeoutExpired:
+            errores.append(f"{modo.upper()}: timeout tras {plan_muestreo['timeout_s']} s")
+        except Exception as exc:
+            errores.append(f"{modo.upper()}: error interno {exc}")
+
+    _limpiar_capturas_generadas(carpeta_destino, nombre_base_capturas, indice_archivo, formato_ext)
+    return [], None, " | ".join(errores) if errores else "Fallo desconocido en extracción one-pass."
+
+def _construir_comando_captura_seek(
+    ffmpeg_path: str,
+    ruta_video: Path,
+    ruta_captura: Path,
+    tiempo: float,
+    formato_ext: str,
+    usar_cuda: bool,
+) -> list[str]:
+    cmd = [ffmpeg_path, "-hide_banner", "-loglevel", "error"]
+    if usar_cuda:
+        # Mantener solo la aceleración de decodificación evita problemas de compatibilidad
+        # con ciertos flujos HEVC Main 10 al descargar frames desde GPU.
+        cmd.extend(["-hwaccel", "cuda"])
+
+    cmd.extend([
+        "-ss", str(tiempo), "-i", str(ruta_video),
+        "-map", "0:v:0", "-an", "-sn", "-dn",
+    ])
+
+    if formato_ext == "png":
+        cmd.extend(["-vframes", "1", "-pix_fmt", "rgb24", "-compression_level", "0"])
+    else:
+        cmd.extend(["-vframes", "1", "-q:v", "0", "-pix_fmt", "yuvj444p"])
+
+    cmd.extend(["-y", str(ruta_captura)])
+    return cmd
+
+def _generar_capturas_por_seek_individual(
+    ffmpeg_path: str,
+    ruta_video: Path,
+    nombre_base_capturas: str,
+    porcentajes: list[float],
+    formato_ext: str,
+    formato_label: str,
+    carpeta_destino: Path,
+    indice_archivo: int,
+    duracion_s: float,
+    progress: Progress,
+    task_id,
+    nombre_display: str,
+    workers_capturas: int,
+) -> list[Path]:
+    """Ruta de compatibilidad: una ejecución de ffmpeg por captura."""
+    workers_capturas = max(1, min(workers_capturas or 1, len(porcentajes)))
+    cuda_disponible = _ffmpeg_tiene_cuda(ffmpeg_path)
+    cuda_deshabilitada = threading.Event()
+    if workers_capturas > 1:
+        log.debug(f"Capturas fallback en paralelo ({workers_capturas} workers) para '{nombre_display}'")
+    if cuda_disponible:
+        log.debug(f"Capturas por seek con CUDA habilitado para '{nombre_display}'")
+
+    def _run_cmd(cmd: list[str], timeout_s: int):
+        return subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            encoding="utf-8",
+            errors="ignore",
+        )
+
+    def _ejecutar_captura(idx: int, pct: float, forzar_cpu: bool = False):
+        tiempo = max(0.1, duracion_s * (pct / 100.0))
+        nombre_captura = f"{nombre_base_capturas}[{indice_archivo}]_Captura[{idx:02d}].{formato_ext}"
+        ruta_captura = carpeta_destino / nombre_captura
+        usar_cuda = cuda_disponible and not forzar_cpu and not cuda_deshabilitada.is_set()
+        cmd = _construir_comando_captura_seek(
+            ffmpeg_path,
+            ruta_video,
+            ruta_captura,
+            tiempo,
+            formato_ext,
+            usar_cuda,
+        )
+        try:
+            _run_cmd(cmd, 45)
+            if ruta_captura.exists():
+                return idx, pct, ruta_captura, None, None
+            return idx, pct, ruta_captura, "warn", f"ffmpeg OK, pero falta archivo captura {formato_label}: {nombre_captura}"
+        except subprocess.CalledProcessError as exc:
+            if usar_cuda:
+                cuda_deshabilitada.set()
+                try:
+                    if ruta_captura.exists():
+                        ruta_captura.unlink()
+                except Exception:
+                    pass
+                log.debug(
+                    f"Fallo CUDA en captura {formato_label} {idx}@{pct}% para '{nombre_display}'. "
+                    "Reintentando en CPU."
+                )
+                return _ejecutar_captura(idx, pct, forzar_cpu=True)
+            error_text = (exc.stderr or exc.stdout or "Sin salida de error especifica.").strip()
+            return idx, pct, None, "error", f"Error ffmpeg (captura {formato_label} {idx}@{pct}%): {error_text}"
+        except subprocess.TimeoutExpired:
+            if usar_cuda:
+                cuda_deshabilitada.set()
+                try:
+                    if ruta_captura.exists():
+                        ruta_captura.unlink()
+                except Exception:
+                    pass
+                return _ejecutar_captura(idx, pct, forzar_cpu=True)
+            return idx, pct, None, "warn", f"Timeout ffmpeg (captura {formato_label} {idx}@{pct}%)"
+        except Exception as exc:
+            if usar_cuda:
+                cuda_deshabilitada.set()
+                try:
+                    if ruta_captura.exists():
+                        ruta_captura.unlink()
+                except Exception:
+                    pass
+                return _ejecutar_captura(idx, pct, forzar_cpu=True)
+            return idx, pct, None, "error", f"Error inesperado interno en ffmpeg (captura {formato_label} {idx}): {exc}"
+
+    completadas = 0
+    resultados = [None] * len(porcentajes)
+    if workers_capturas == 1:
+        for idx, pct in enumerate(porcentajes, 1):
+            idx, pct, ruta_captura, nivel, mensaje = _ejecutar_captura(idx, pct)
+            completadas += 1
+            if nivel == "warn":
+                log.warning(mensaje)
+            elif nivel == "error":
+                log.error(mensaje)
+            else:
+                resultados[idx - 1] = ruta_captura
+                log.debug(f"Captura {formato_label} generada: {ruta_captura.name}")
+            progress.update(task_id, advance=1, description=f"[cyan]{nombre_display}[/] [yellow]- Captura {completadas}/{len(porcentajes)}[/yellow]")
+    else:
+        with ThreadPoolExecutor(max_workers=workers_capturas) as executor:
+            futures = {
+                executor.submit(_ejecutar_captura, idx, pct): (idx, pct)
+                for idx, pct in enumerate(porcentajes, 1)
+            }
+            for future in as_completed(futures):
+                idx_ref, pct_ref = futures[future]
+                try:
+                    idx, pct, ruta_captura, nivel, mensaje = future.result()
+                except Exception as exc:
+                    idx, pct = idx_ref, pct_ref
+                    ruta_captura = None
+                    nivel = "error"
+                    mensaje = f"Error inesperado interno en ffmpeg (captura {formato_label} {idx}): {exc}"
+
+                completadas += 1
+                if nivel == "warn":
+                    log.warning(mensaje)
+                elif nivel == "error":
+                    log.error(mensaje)
+                else:
+                    resultados[idx - 1] = ruta_captura
+                    if ruta_captura:
+                        log.debug(f"Captura {formato_label} generada: {ruta_captura.name}")
+                progress.update(task_id, advance=1, description=f"[cyan]{nombre_display}[/] [yellow]- Captura {completadas}/{len(porcentajes)}[/yellow]")
+
+    return [captura for captura in resultados if captura]
+
 @safe_run
 def generar_capturas(
     ruta_video: Path,
@@ -628,7 +1363,7 @@ def generar_capturas(
     task_id,
     workers_capturas: int | None = None,
 ) -> list[Path]:
-    """Genera capturas de pantalla en formato JPG/PNG usando ffmpeg."""
+    """Genera capturas de pantalla priorizando una sola pasada de ffmpeg por video."""
     capturas_generadas = []
     nombre_display = display_name_until_parenthesis(ruta_video.name)
     image_format = (image_format or "jpg").lower()
@@ -660,86 +1395,74 @@ def generar_capturas(
         progress.update(task_id, completed=1, total=1, description=f"[cyan]{nombre_display}[/] [warn]- Sin capturas[/warn]")
         return capturas_generadas
 
+    plan_muestreo = _calcular_plan_muestreo_capturas(porcentajes, duracion_s)
+    usar_one_pass = bool(
+        plan_muestreo and plan_muestreo["intervalo_s"] <= CAPTURAS_ONE_PASS_MAX_INTERVAL_S
+    )
+    if usar_one_pass:
+        log.info(
+            f"Capturas {formato_label} one-pass para '{nombre_display}': "
+            f"{total_capturas} imágenes, intervalo medio ~{plan_muestreo['intervalo_s']:.2f}s."
+        )
+        progress.update(
+            task_id,
+            completed=0,
+            total=total_capturas,
+            description=f"[cyan]{nombre_display}[/] [yellow]- Capturas {formato_label} one-pass...[/yellow]",
+        )
+        capturas_generadas, modo_usado, error_one_pass = _ejecutar_capturas_one_pass(
+            ffmpeg_path,
+            ruta_video,
+            nombre_base_capturas,
+            carpeta_destino,
+            indice_archivo,
+            formato_ext,
+            plan_muestreo,
+        )
+        if capturas_generadas:
+            log.info(
+                f"Generadas {len(capturas_generadas)}/{total_capturas} capturas {formato_label} "
+                f"para '{nombre_display}' usando {modo_usado}."
+            )
+            progress.update(
+                task_id,
+                completed=total_capturas,
+                description=f"[cyan]{nombre_display}[/] [green]- Capturas OK ({modo_usado})[/green]",
+            )
+            return capturas_generadas
+
+        log.warning(
+            f"Extracción one-pass falló para '{nombre_display}'. "
+            f"Se usará fallback por seek individual. Detalle: {error_one_pass}"
+        )
+    elif plan_muestreo:
+        log.info(
+            f"Capturas {formato_label} por seek para '{nombre_display}': "
+            f"intervalo medio ~{plan_muestreo['intervalo_s']:.2f}s, por encima del umbral one-pass."
+        )
+
     workers_capturas = max(1, min(workers_capturas or 1, total_capturas))
-    if workers_capturas > 1:
-        log.debug(f"Capturas en paralelo ({workers_capturas} workers) para '{nombre_display}'")
-
-    def _ejecutar_captura(idx: int, pct: float):
-        tiempo = max(0.1, duracion_s * (pct / 100.0))
-        nombre_captura = f"{nombre_base_capturas}[{indice_archivo}]_Captura[{idx:02d}].{formato_ext}"
-        ruta_captura = carpeta_destino / nombre_captura
-
-        if formato_ext == "png":
-            cmd = [
-                ffmpeg_path, "-hide_banner", "-loglevel", "error",
-                "-ss", str(tiempo), "-i", str(ruta_video),
-                "-map", "0:v:0", "-an", "-sn", "-dn",
-                "-vframes", "1", "-pix_fmt", "rgb24", "-compression_level", "0",
-                "-y", str(ruta_captura),
-            ]
-        else:
-            cmd = [
-                ffmpeg_path, "-hide_banner", "-loglevel", "error",
-                "-ss", str(tiempo), "-i", str(ruta_video),
-                "-map", "0:v:0", "-an", "-sn", "-dn",
-                "-vframes", "1", "-q:v", "0", "-pix_fmt", "yuvj444p",
-                "-y", str(ruta_captura),
-            ]
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=45, encoding='utf-8', errors='ignore')
-            if ruta_captura.exists():
-                return idx, pct, ruta_captura, None, None
-            return idx, pct, ruta_captura, "warn", f"ffmpeg OK, pero falta archivo captura {formato_label}: {nombre_captura}"
-        except subprocess.CalledProcessError as e:
-            error_text = (e.stderr or e.stdout or "Sin salida de error especifica.").strip()
-            return idx, pct, None, "error", f"Error ffmpeg (captura {formato_label} {idx}@{pct}%): {error_text}"
-        except subprocess.TimeoutExpired:
-            return idx, pct, None, "warn", f"Timeout ffmpeg (captura {formato_label} {idx}@{pct}%)"
-        except Exception as e_inner:
-            return idx, pct, None, "error", f"Error inesperado interno en ffmpeg (captura {formato_label} {idx}): {e_inner}"
-
-    completadas = 0
-    resultados = [None] * total_capturas
-    if workers_capturas == 1:
-        for idx, pct in enumerate(porcentajes, 1):
-            idx, pct, ruta_captura, nivel, mensaje = _ejecutar_captura(idx, pct)
-            completadas += 1
-            if nivel == "warn":
-                log.warning(mensaje)
-            elif nivel == "error":
-                log.error(mensaje)
-            else:
-                resultados[idx - 1] = ruta_captura
-                log.debug(f"Captura {formato_label} generada: {ruta_captura.name}")
-            progress.update(task_id, advance=1, description=f"[cyan]{nombre_display}[/] [yellow]- Captura {completadas}/{total_capturas}[/yellow]")
-    else:
-        with ThreadPoolExecutor(max_workers=workers_capturas) as executor:
-            futures = {
-                executor.submit(_ejecutar_captura, idx, pct): (idx, pct)
-                for idx, pct in enumerate(porcentajes, 1)
-            }
-            for future in as_completed(futures):
-                idx_ref, pct_ref = futures[future]
-                try:
-                    idx, pct, ruta_captura, nivel, mensaje = future.result()
-                except Exception as e_inner:
-                    idx, pct = idx_ref, pct_ref
-                    ruta_captura = None
-                    nivel = "error"
-                    mensaje = f"Error inesperado interno en ffmpeg (captura {formato_label} {idx}): {e_inner}"
-
-                completadas += 1
-                if nivel == "warn":
-                    log.warning(mensaje)
-                elif nivel == "error":
-                    log.error(mensaje)
-                else:
-                    resultados[idx - 1] = ruta_captura
-                    if ruta_captura:
-                        log.debug(f"Captura {formato_label} generada: {ruta_captura.name}")
-                progress.update(task_id, advance=1, description=f"[cyan]{nombre_display}[/] [yellow]- Captura {completadas}/{total_capturas}[/yellow]")
-
-    capturas_generadas = [c for c in resultados if c]
+    progress.update(
+        task_id,
+        completed=0,
+        total=total_capturas,
+        description=f"[cyan]{nombre_display}[/] [yellow]- Capturas {formato_label} fallback...[/yellow]",
+    )
+    capturas_generadas = _generar_capturas_por_seek_individual(
+        ffmpeg_path,
+        ruta_video,
+        nombre_base_capturas,
+        porcentajes,
+        formato_ext,
+        formato_label,
+        carpeta_destino,
+        indice_archivo,
+        duracion_s,
+        progress,
+        task_id,
+        nombre_display,
+        workers_capturas,
+    )
     log.info(
         f"Generadas {len(capturas_generadas)}/{len(porcentajes)} capturas {formato_label} para '{nombre_display}'."
     )
@@ -777,9 +1500,10 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
     ok = True
     for idx, video_file in enumerate(video_files_to_compress, 1):
         nombre_limpio = clean_name(video_file.stem)
-        obfuscated_name = obfuscate_rar_basename(nombre_limpio)
+        obfuscated_name = obfuscate_rar_basename(video_file.stem)
         rar_filename = f"{obfuscated_name}{RAR_FILENAME_SUFFIX}.rar"
         rar_filepath = rars_dir / rar_filename
+        rar_internal_folder = f"{obfuscated_name}_{secrets.token_hex(3).upper()}"
         nombre_display = display_name_until_parenthesis(video_file.name)
 
         # Actualiza la descripción para mostrar qué archivo se está procesando AHORA
@@ -800,7 +1524,7 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
             if active_split_config:
                 cmd.extend(active_split_config["volume_switches"])
             cmd.extend([
-                "-ep1", "-o+",
+                "-ep1", f"-ap{rar_internal_folder}", "-o+",
                 str(rar_filepath.resolve()),
                 str(video_file.resolve())
             ])
@@ -809,6 +1533,13 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
         try:
             action_verb = "Almacenando" if rar_store_only else "Comprimiendo"
             split_msg = split_config["split_msg"] if split_config else ""
+            existing_volumes = obtener_volumenes_rar_generados(rar_filepath)
+            if existing_volumes:
+                log.debug(
+                    f"Limpiando volúmenes RAR previos para '{nombre_display}': "
+                    f"{', '.join(path.name for path in existing_volumes)}"
+                )
+                eliminar_volumenes_rar(existing_volumes)
             log.info(f"{action_verb} [{idx}/{total_files}] '{nombre_display}' -> '{rar_filename}'{split_msg}")
 
             generated_volumes: list[Path] = []
@@ -853,7 +1584,9 @@ def comprimir_carpeta_rar(carpeta_path: Path, video_files_to_compress: list[Path
                 split_msg = f"{split_config['split_msg']} (reajustado)"
 
             progress.update(task_id, completed=idx)
-            log.info(f"Creación RAR [{idx}/{total_files}] exitosa: '{rar_filename}'")
+            log.info(
+                f"Creación RAR [{idx}/{total_files}] exitosa: '{rar_filename}' "
+                f"(carpeta interna: '{rar_internal_folder}')")
         except subprocess.CalledProcessError as e:
             error_message = e.stderr or e.stdout or "Sin salida de error específica."
             log.error(f"Error durante la creación RAR para '{nombre_display}' (código {e.returncode}):\n{error_message.strip()}")
@@ -885,6 +1618,7 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
         "ruta": ruta_video,
         "nombre_original": ruta_video.name,
         "nombre_limpio": None,
+        "nombre_rar": None,
         "info_media": {"error": "No procesado"}, # Default error
         "peso_str": "Desconocido",
         "peso_bytes": 0,
@@ -898,6 +1632,7 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
         # 1. Limpiar nombre base (para capturas y referencia)
         # Usamos la nueva función clean_name
         resultado_video["nombre_limpio"] = clean_name(ruta_video.stem) or ruta_video.stem # Fallback
+        resultado_video["nombre_rar"] = f"{obfuscate_rar_basename(ruta_video.stem)}{RAR_FILENAME_SUFFIX}"
 
         # 2. Obtener información de medios (ya está decorada con @safe_run)
         resultado_video["info_media"] = obtener_info_media(ruta_video)
@@ -958,23 +1693,32 @@ def procesar_un_video(ruta_video: Path, indice_archivo: int, total_archivos: int
 
 
 # --- Procesamiento por Carpeta ---
-def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Progress):
+def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Progress,
+                     archivos_video_override: list[Path] | None = None,
+                     nombre_carpeta_override: str | None = None):
     """Procesa una carpeta: busca videos, los procesa en paralelo, muestra info y comprime."""
-    nombre_carpeta = carpeta_path.name
+    nombre_carpeta = nombre_carpeta_override or carpeta_path.name
     log.info(f"Iniciando procesamiento de carpeta: {nombre_carpeta}")
     console.print(Panel(f"[head]Carpeta:[/head] [path]{nombre_carpeta}[/path]", expand=False, border_style="blue"))
 
-    # Usar Path.rglob para buscar videos
-    try:
+    if archivos_video_override is None:
+        # Usar Path.rglob para buscar videos
+        try:
+            archivos_video = sorted([
+                p for p in carpeta_path.rglob('*')
+                if p.is_file() and p.suffix.lower() in args.exts
+                   and NOMBRE_CARPETA_CAPTURAS not in p.parts # Evitar buscar in carpeta de capturas
+            ])
+        except Exception as e:
+             log.error(f"Error buscando videos en '{carpeta_path}': {e}", exc_info=True)
+             console.print(f"  [fail]Error buscando videos en esta carpeta.[/fail]")
+             return 0, 0
+    else:
         archivos_video = sorted([
-            p for p in carpeta_path.rglob('*')
+            p.resolve() for p in archivos_video_override
             if p.is_file() and p.suffix.lower() in args.exts
-               and NOMBRE_CARPETA_CAPTURAS not in p.parts # Evitar buscar in carpeta de capturas
+               and NOMBRE_CARPETA_CAPTURAS not in p.parts
         ])
-    except Exception as e:
-         log.error(f"Error buscando videos en '{carpeta_path}': {e}", exc_info=True)
-         console.print(f"  [fail]Error buscando videos en esta carpeta.[/fail]")
-         return 0, 0
 
     if not archivos_video:
         log.warning(f"No se encontraron videos en la carpeta '{nombre_carpeta}'.")
@@ -1070,6 +1814,8 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
         duracion_str = f"{int(duracion_s // 3600):02d}:{int((duracion_s % 3600) // 60):02d}:{int(duracion_s % 60):02d}" if duracion_s else "N/A"
         audio_str = armar_cadena_agrupada(info.get('audio', []), 'audio')
         subtitulos_str = armar_cadena_agrupada(info.get('subtitulos', []), 'subs')
+        audio_plain = strip_rich_markup(audio_str)
+        subtitulos_plain = strip_rich_markup(subtitulos_str)
         capturas_paths = res.get('capturas_generadas', [])
         capturas_nombres = [c.name for c in capturas_paths]
         if capturas_nombres:
@@ -1083,6 +1829,7 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
             capturas_str = "[info]Omitidas[/info]"
 
         info_panel = (
+            f"[info]RAR:[/info]     [detail]{res.get('nombre_rar', 'N/A')}[/detail]\n"
             f"[info]Limpio:[/info]  [detail]{res.get('nombre_limpio', 'N/A')}[/detail]\n"
             f"[info]Resolucion.:[/info]  {info.get('resolucion', 'N/A')} ({info.get('formato_video', 'N/A')})\n"
             f"[info]Duracion.:[/info]  {duracion_str}\n"
@@ -1092,6 +1839,16 @@ def procesar_carpeta(carpeta_path: Path, args: argparse.Namespace, progress: Pro
             f"[info]Capturas:[/info]    {capturas_str}"
         )
         console.print(Panel(info_panel, title=f"[cyan]{res.get('nombre_original', 'N/A')}[/cyan]", border_style="cyan", expand=False))
+        print(
+            "MWO_RAW_DATA\t"
+            f"{res.get('nombre_original', 'N/A')}\t"
+            f"{info.get('resolucion', 'N/A')}\t"
+            f"{res.get('peso_str', 'N/A')}\t"
+            f"{audio_plain}\t"
+            f"{subtitulos_plain}\t"
+            f"{res.get('nombre_limpio', 'N/A')}\t"
+            f"{res.get('nombre_rar', 'N/A')}"
+        )
     # --- Fin mostrar resultados ---
 
     # --- Compresión de la carpeta ---
@@ -1125,7 +1882,7 @@ def main():
     ap = argparse.ArgumentParser(description="Workflow de análisis y compresión de videos con Rich Progress.",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("basedir", nargs='?', default=DEFAULT_DIRECTORIO,
-                    help="Directorio base que contiene las subcarpetas a procesar.")
+                    help="Directorio base que contiene las subcarpetas a procesar, o un archivo de video directo.")
     ap.add_argument("--rar-path", default=DEFAULT_RAR_EXE,
                     help="Ruta completa al ejecutable 'rar.exe'.")
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
@@ -1177,7 +1934,14 @@ def main():
 
     # --- Validaciones Iniciales ---
     base_path = Path(args.basedir).resolve()
-    if not base_path.is_dir():
+    input_video_path: Path | None = None
+    if base_path.is_file():
+        if base_path.suffix.lower() not in args.exts:
+            log.critical(f"El archivo especificado no es un video compatible: {base_path}")
+            console.print(f"[fail]Error:[/fail] Archivo de video no válido: [path]{base_path}[/path]")
+            sys.exit(1)
+        input_video_path = base_path
+    elif not base_path.is_dir():
         log.critical(f"El directorio base especificado no existe o no es un directorio: {base_path}")
         console.print(f"[fail]Error:[/fail] Directorio base no válido: [path]{base_path}[/path]")
         sys.exit(1)
@@ -1198,27 +1962,41 @@ def main():
         console.print(f"[warn]Advertencia:[/warn] 'rar.exe' no encontrado en [path]{args.rar_path}[/path]. Se desactivará la compresión (--no-compress implícito).")
         args.compress = False # Forzar desactivación
 
+    input_label = "Archivo Base" if input_video_path else "Directorio Base"
     console.print(Panel(f"[head]== INICIO DEL PROCESO ==[/head]\n"
-                      f"Directorio Base: [path]{base_path}[/path]\n"
+                      f"{input_label}: [path]{base_path}[/path]\n"
                       f"Workers: {args.workers} | Capturas: {'Sí' if not args.skip_img else 'No'} | Compresión: {'Sí' if args.compress else 'No'}",
                       expand=False, border_style="magenta"))
     start_time = datetime.now()
 
-    # --- Búsqueda de Subcarpetas ---
-    try:
-        # Listar solo directorios directamente dentro de base_path
-        subcarpetas = sorted([d for d in base_path.iterdir() if d.is_dir()])
-    except Exception as e:
-        log.critical(f"Error listando subcarpetas en '{base_path}': {e}", exc_info=True)
-        console.print(f"[fail]Error fatal:[/fail] No se pudo listar el contenido de '{base_path}'.")
-        sys.exit(1)
+    subcarpetas: list[Path] = []
+    videos_directos_base: list[Path] = []
+    if input_video_path is None:
+        # --- Búsqueda de contenido directo ---
+        try:
+            elementos_directos = list(base_path.iterdir())
+            subcarpetas = sorted([d for d in elementos_directos if d.is_dir()])
+            videos_directos_base = sorted([
+                p.resolve() for p in elementos_directos
+                if p.is_file()
+                   and p.suffix.lower() in args.exts
+                   and NOMBRE_CARPETA_CAPTURAS not in p.parts
+            ])
+        except Exception as e:
+            log.critical(f"Error listando contenido en '{base_path}': {e}", exc_info=True)
+            console.print(f"[fail]Error fatal:[/fail] No se pudo listar el contenido de '{base_path}'.")
+            sys.exit(1)
 
-    if not subcarpetas:
-        log.warning(f"No se encontraron subcarpetas directas en '{base_path}'.")
-        console.print(f"[warn]Advertencia:[/warn] No se encontraron subcarpetas para procesar en [path]{base_path}[/path].")
-        sys.exit(0)
+        if not subcarpetas and not videos_directos_base:
+            log.warning(f"No se encontraron subcarpetas ni videos directos en '{base_path}'.")
+            console.print(f"[warn]Advertencia:[/warn] No se encontraron subcarpetas ni videos directos para procesar en [path]{base_path}[/path].")
+            sys.exit(0)
 
-    log.info(f"Encontradas {len(subcarpetas)} subcarpetas para analizar.")
+        log.info(
+            f"Encontradas {len(subcarpetas)} subcarpetas y {len(videos_directos_base)} video(s) directos en '{base_path}'."
+        )
+    else:
+        log.info(f"Procesando archivo individual como entrada directa: {input_video_path}")
 
     # --- Procesamiento Principal con Rich Progress ---
     stats = {"total_carpetas": 0, "carpetas_con_videos": 0, "videos_procesados_ok": 0, "peso_total_bytes": 0}
@@ -1233,24 +2011,64 @@ def main():
     # Crear la instancia de Progress
     with Progress(*progress_columns, console=console, transient=False) as progress: # transient=False para que quede visible al final
         # Tarea global para el progreso general de carpetas
-        task_overall = progress.add_task(f"[magenta]Progreso General Carpetas", total=len(subcarpetas))
+        total_contextos = 1 if input_video_path else len(subcarpetas) + (1 if videos_directos_base else 0)
+        task_overall = progress.add_task(f"[magenta]Progreso General Carpetas", total=total_contextos)
 
-        for carpeta in subcarpetas:
+        if input_video_path:
             try:
-                # Pasar 'progress' a la función para que añada tareas hijas
-                videos_ok, peso_carpeta = procesar_carpeta(carpeta, args, progress)
+                videos_ok, peso_carpeta = procesar_carpeta(
+                    input_video_path.parent,
+                    args,
+                    progress,
+                    archivos_video_override=[input_video_path],
+                    nombre_carpeta_override=input_video_path.stem)
                 stats["total_carpetas"] += 1
                 if videos_ok > 0:
                     stats["carpetas_con_videos"] += 1
                     stats["videos_procesados_ok"] += videos_ok
                     stats["peso_total_bytes"] += peso_carpeta
             except Exception as e:
-                # Captura de errores inesperados a nivel de carpeta
-                log.critical(f"Error fatal no controlado procesando carpeta '{carpeta.name}': {e}", exc_info=True)
-                console.print(f"[fail]Error Inesperado:[/fail] Fallo procesando la carpeta '{carpeta.name}'. Ver logs.")
+                log.critical(f"Error fatal no controlado procesando archivo '{input_video_path.name}': {e}", exc_info=True)
+                console.print(f"[fail]Error Inesperado:[/fail] Fallo procesando el archivo '{input_video_path.name}'. Ver logs.")
             finally:
-                # Avanzar la tarea general sin importar el resultado de la carpeta
                 progress.update(task_overall, advance=1)
+        else:
+            if videos_directos_base:
+                try:
+                    nombre_directos = videos_directos_base[0].stem if len(videos_directos_base) == 1 else f"{base_path.name} (directos)"
+                    videos_ok, peso_carpeta = procesar_carpeta(
+                        base_path,
+                        args,
+                        progress,
+                        archivos_video_override=videos_directos_base,
+                        nombre_carpeta_override=nombre_directos)
+                    stats["total_carpetas"] += 1
+                    if videos_ok > 0:
+                        stats["carpetas_con_videos"] += 1
+                        stats["videos_procesados_ok"] += videos_ok
+                        stats["peso_total_bytes"] += peso_carpeta
+                except Exception as e:
+                    log.critical(f"Error fatal no controlado procesando videos directos en '{base_path}': {e}", exc_info=True)
+                    console.print(f"[fail]Error Inesperado:[/fail] Fallo procesando los videos directos en '{base_path.name}'. Ver logs.")
+                finally:
+                    progress.update(task_overall, advance=1)
+
+            for carpeta in subcarpetas:
+                try:
+                    # Pasar 'progress' a la función para que añada tareas hijas
+                    videos_ok, peso_carpeta = procesar_carpeta(carpeta, args, progress)
+                    stats["total_carpetas"] += 1
+                    if videos_ok > 0:
+                        stats["carpetas_con_videos"] += 1
+                        stats["videos_procesados_ok"] += videos_ok
+                        stats["peso_total_bytes"] += peso_carpeta
+                except Exception as e:
+                    # Captura de errores inesperados a nivel de carpeta
+                    log.critical(f"Error fatal no controlado procesando carpeta '{carpeta.name}': {e}", exc_info=True)
+                    console.print(f"[fail]Error Inesperado:[/fail] Fallo procesando la carpeta '{carpeta.name}'. Ver logs.")
+                finally:
+                    # Avanzar la tarea general sin importar el resultado de la carpeta
+                    progress.update(task_overall, advance=1)
     # --- Fin Progress ---
 
     # --- Resumen Final ---
@@ -1275,6 +2093,8 @@ def main():
         summary_table.add_row("Peso total de videos procesados", peso_total_str)
         summary_table.add_row("Peso promedio por video", peso_promedio_str)
     else:
+        peso_total_str = "N/A"
+        peso_promedio_str = "N/A"
         summary_table.add_row("Peso total de videos procesados", "[detail]N/A[/detail]")
         summary_table.add_row("Peso promedio por video", "[detail]N/A[/detail]")
 
@@ -1284,6 +2104,7 @@ def main():
         summary_table.add_row("Log detallado", "[info]No guardado (solo consola)[/info]")
 
     console.print(summary_table)
+    print(f"MWO_WEIGHT_SUMMARY\t{peso_total_str}\t{peso_promedio_str}")
     log.info("--- Script Finalizado ---")
 
     # Opcional: Guardar salida de consola si se grabó
